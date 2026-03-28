@@ -2,6 +2,8 @@
 
 A Rubik's Cube project built around a Maya tool and a standalone solver core.
 
+![Rubik's Cube solver demo](README_media/20260328_solverImplemented.gif)
+
 The repository is centered on two visible Python modules:
 
 - `rubiks_cube.py` for the Maya scene tool, UI, cube manipulation, and solve integration

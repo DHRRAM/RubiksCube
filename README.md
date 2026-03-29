@@ -2,8 +2,10 @@
 
 A Rubik's Cube project built around a Maya tool and a standalone solver core.
 
-![Rubik's Cube Solver Demo](README_media/20260329_ProgressVid_Solving.mp4)
-![Rubik's Cube Aesthetics Demo](README_media/20260329_ProgressVid_Aesthetics.mp4)
+Demo videos:
+
+- [Solving demo (.mp4)](README_media/20260329_ProgressVid_Solving.mp4)
+- [Aesthetics demo (.mp4)](README_media/20260329_ProgressVid_Aesthetics.mp4)
 
 The repository is centered on two visible Python modules:
 

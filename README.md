@@ -53,6 +53,10 @@ This project lets you:
 
 To use `rubiks_cube.py`, you need Autodesk Maya with Python support.
 
+Supported Maya versions: Autodesk Maya 2022 or newer.
+
+Older Maya releases that are centered on Python 2 are not supported by this repository's current shared modules.
+
 The script uses Maya APIs such as:
 
 - `maya.cmds`
@@ -65,6 +69,10 @@ It also supports Qt-based integrations when available:
 - `maya.OpenMayaUI`
 
 Some viewport-control behavior is nicer when the Qt modules are available, but the core Maya functionality is still centered on Maya's Python environment.
+
+For local regression coverage outside Maya, run:
+
+`python -m unittest discover -s tests`
 
 ### Standalone solver
 

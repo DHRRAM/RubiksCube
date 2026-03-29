@@ -341,6 +341,7 @@ SCRAMBLE_ACTIVE = False
 SCRAMBLE_STOP_REQUESTED = False
 SCRAMBLE_PENDING_MOVES = []
 SCRAMBLE_CACHE_WAS_ENABLED = None
+ALGORITHM_CACHE_WAS_ENABLED = None
 ALGORITHM_RUN_ACTIVE = False
 ALGORITHM_RUN_STOP_REQUESTED = False
 ALGORITHM_RUN_PENDING_MOVES = []
@@ -924,6 +925,34 @@ def setup_materials():
         "green": create_material("rubiks_green", face_colors["L"]),
         "black": create_material("rubiks_black", (0.02, 0.02, 0.02)),
     }
+
+
+# Delete only the shader nodes created by this tool so rerunning the script
+# starts from a clean material state without touching unrelated scene shaders.
+def delete_existing_tool_materials():
+    material_names = [
+        "rubiks_white",
+        "rubiks_yellow",
+        "rubiks_red",
+        "rubiks_orange",
+        "rubiks_blue",
+        "rubiks_green",
+        "rubiks_black",
+    ]
+    control_names = ["ctrl_U", "ctrl_D", "ctrl_R", "ctrl_L", "ctrl_F", "ctrl_B"]
+    shading_nodes = []
+
+    for material_name in material_names:
+        shading_nodes.append(material_name + "SG")
+        shading_nodes.append(material_name)
+
+    for control_name in control_names:
+        shading_nodes.append(control_name + "_fill_matSG")
+        shading_nodes.append(control_name + "_fill_mat")
+
+    existing_nodes = [node for node in shading_nodes if cmds.objExists(node)]
+    if existing_nodes:
+        cmds.delete(existing_nodes)
     
 # -------------------------
 # Cubie Face Coloring
@@ -3762,6 +3791,51 @@ def restore_cached_playback_after_scramble():
         pass
 
 
+# Temporarily suspend Cached Playback so animated solve/algorithm playback does
+# not accumulate every intermediate keyed turn in the evaluation cache.
+def suspend_cached_playback_for_algorithm():
+    global ALGORITHM_CACHE_WAS_ENABLED
+
+    if ALGORITHM_CACHE_WAS_ENABLED is not None:
+        return
+
+    try:
+        cache_enabled = cmds.evaluator(name="cache", query=True, enable=True)
+    except Exception:
+        ALGORITHM_CACHE_WAS_ENABLED = None
+        return
+
+    ALGORITHM_CACHE_WAS_ENABLED = bool(cache_enabled)
+    if not ALGORITHM_CACHE_WAS_ENABLED:
+        return
+
+    try:
+        cmds.evaluator(name="cache", enable=False)
+        cmds.cacheEvaluator(flushCache="destroy")
+    except Exception:
+        pass
+
+
+# Restore Cached Playback to the user's previous state after a deferred
+# algorithm or solve run completes.
+def restore_cached_playback_after_algorithm():
+    global ALGORITHM_CACHE_WAS_ENABLED
+
+    if ALGORITHM_CACHE_WAS_ENABLED is None:
+        return
+
+    was_enabled = ALGORITHM_CACHE_WAS_ENABLED
+    ALGORITHM_CACHE_WAS_ENABLED = None
+
+    if not was_enabled:
+        return
+
+    try:
+        cmds.evaluator(name="cache", enable=True)
+    except Exception:
+        pass
+
+
 # Apply a single move from a UI button or viewport control.
 def move(move_name):
     if is_busy_with_sequence():
@@ -3876,6 +3950,8 @@ def begin_algorithm_run(move_names):
     ALGORITHM_RUN_ACTIVE = True
     ALGORITHM_RUN_STOP_REQUESTED = False
     ALGORITHM_RUN_PENDING_MOVES = list(move_names)
+    if get_animation_enabled():
+        suspend_cached_playback_for_algorithm()
     update_run_algorithm_button_label()
     update_playback_ui()
     schedule_next_algorithm_move()
@@ -3935,6 +4011,7 @@ def finish_algorithm_run():
     ALGORITHM_RUN_ACTIVE = False
     ALGORITHM_RUN_STOP_REQUESTED = False
     ALGORITHM_RUN_PENDING_MOVES = []
+    restore_cached_playback_after_algorithm()
     update_run_algorithm_button_label()
     update_playback_ui()
 
@@ -5743,6 +5820,7 @@ def update_controls_button_label():
 if get_all_cubies():
         cmds.delete(get_all_cubies())
 delete_existing_controls()
+delete_existing_tool_materials()
 clear_stale_selection_script_jobs()
 apply_theme(THEME_NAME)
 create_ui()

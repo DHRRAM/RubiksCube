@@ -9,6 +9,39 @@ from itertools import combinations
 
 import maya.cmds as cmds
 import maya.utils as maya_utils
+from rubiks_move_notation import (
+    CUBE_ROTATIONS,
+    FACE_VECTORS,
+    MOVES,
+    PHASE1_MOVE_NAMES,
+    PHASE2_MOVE_NAMES,
+    SEARCH_MOVE_NAMES,
+    expand_solver_moves,
+    format_move_sequence,
+    generate_scramble_text,
+    get_inverse_move,
+    get_move_face,
+    normalize_algorithm_text,
+    parse_move_sequence,
+    should_prune_search_move,
+)
+from rubiks_state_utils import (
+    apply_move_sequence_to_cube_state as apply_move_sequence_with_tables,
+    apply_move_to_cube_state as apply_move_to_cube_state_with_tables,
+    apply_move_to_piece_state,
+    build_move_state_tables as build_shared_move_state_tables,
+    build_piece_state_catalogs as build_shared_piece_state_catalogs,
+    build_solved_cube_state as build_shared_solved_cube_state,
+    build_solved_piece_states as build_shared_solved_piece_states,
+    build_solver_piece_metadata as build_shared_solver_piece_metadata,
+    rotate_logical_vector,
+)
+from rubiks_tool_paths import (
+    TOOL_DIRECTORY_OPTIONVAR,
+    add_search_directory,
+    find_module_file,
+    load_module_from_file,
+)
 
 try:
     from PySide2 import QtCore, QtWidgets
@@ -35,7 +68,6 @@ if "__file__" in globals():
 standalone_solver_core = None
 STANDALONE_SOLVER_IMPORT_ERROR = None
 STANDALONE_SOLVER_MODULE_MTIME = None
-TOOL_DIRECTORY_OPTIONVAR = "RubiksCubeToolDirectory"
 
 # This script builds a Rubik's Cube in Maya and provides three main systems:
 # 1. Cube creation/material assignment.
@@ -51,6 +83,16 @@ SCRAMBLE_LENGTH = 20
 
 current_time = 1
 ANIMATE_CHECKBOX = "rubikAnimateCheck"
+MOVE_SPEED_SLIDER = "rubikMoveSpeedSlider"
+ALGORITHM_FIELD = "rubikAlgorithmField"
+RUN_ALGORITHM_BUTTON = "runAlgorithmButton"
+PLAYBACK_PLAY_BUTTON = "playbackPlayButton"
+PLAYBACK_STEP_BACK_BUTTON = "playbackStepBackButton"
+PLAYBACK_STEP_FORWARD_BUTTON = "playbackStepForwardButton"
+PLAYBACK_UNDO_BUTTON = "playbackUndoButton"
+PLAYBACK_REDO_BUTTON = "playbackRedoButton"
+PLAYBACK_SCRUB_SLIDER = "playbackScrubSlider"
+PLAYBACK_STATUS_TEXT = "playbackStatusText"
 ANIMATED_ATTRS = [
     "translateX",
     "translateY",
@@ -74,10 +116,166 @@ FACE_COLORS = {
     "F": (1, 0, 0),
     "B": (1, 0.5, 0),
 }
+THEME_PRESETS = {
+    "Classic": {
+        "face_colors": {
+            "U": (1.0, 1.0, 1.0),
+            "D": (1.0, 0.9, 0.1),
+            "R": (0.1, 0.3, 1.0),
+            "L": (0.1, 0.8, 0.25),
+            "F": (0.95, 0.1, 0.1),
+            "B": (1.0, 0.5, 0.05),
+        },
+        "background": (
+            (0.18, 0.2, 0.24),
+            (0.24, 0.28, 0.34),
+            (0.13, 0.14, 0.16),
+        ),
+    },
+    "Blueprint": {
+        "face_colors": {
+            "U": (0.92, 0.98, 1.0),
+            "D": (0.74, 0.9, 0.98),
+            "R": (0.18, 0.58, 1.0),
+            "L": (0.14, 0.82, 0.78),
+            "F": (1.0, 0.43, 0.32),
+            "B": (1.0, 0.72, 0.32),
+        },
+        "background": (
+            (0.05, 0.12, 0.2),
+            (0.1, 0.2, 0.32),
+            (0.03, 0.07, 0.12),
+        ),
+    },
+    "Sunset Horizon": {
+        "face_colors": {
+            "U": (1.0, 0.96, 0.84),
+            "D": (1.0, 0.83, 0.33),
+            "R": (0.95, 0.35, 0.37),
+            "L": (0.49, 0.78, 0.66),
+            "F": (1.0, 0.58, 0.32),
+            "B": (0.74, 0.48, 0.93),
+        },
+        "background": (
+            (0.33, 0.18, 0.16),
+            (0.55, 0.31, 0.24),
+            (0.14, 0.08, 0.1),
+        ),
+    },
+    "Futuristic Neon": {
+        "face_colors": {
+            "U": (0.95, 0.96, 0.98),
+            "D": (0.48, 0.88, 0.96),
+            "R": (0.17, 0.78, 1.0),
+            "L": (0.63, 0.86, 0.33),
+            "F": (1.0, 0.27, 0.54),
+            "B": (0.45, 0.28, 1.0),
+        },
+        "background": (
+            (0.08, 0.1, 0.16),
+            (0.14, 0.18, 0.27),
+            (0.04, 0.05, 0.09),
+        ),
+    },
+    "Earthy & Organic": {
+        "face_colors": {
+            "U": (0.94, 0.89, 0.81),
+            "D": (0.72, 0.59, 0.44),
+            "R": (0.52, 0.38, 0.28),
+            "L": (0.35, 0.51, 0.39),
+            "F": (0.56, 0.43, 0.3),
+            "B": (0.2, 0.25, 0.22),
+        },
+        "background": (
+            (0.18, 0.15, 0.12),
+            (0.28, 0.23, 0.18),
+            (0.1, 0.08, 0.06),
+        ),
+    },
+    "Sports & Energy": {
+        "face_colors": {
+            "U": (0.96, 0.97, 0.94),
+            "D": (0.61, 0.89, 0.41),
+            "R": (0.89, 0.15, 0.12),
+            "L": (0.18, 0.18, 0.18),
+            "F": (0.99, 0.77, 0.14),
+            "B": (0.41, 0.62, 0.38),
+        },
+        "background": (
+            (0.13, 0.14, 0.12),
+            (0.21, 0.23, 0.18),
+            (0.07, 0.08, 0.06),
+        ),
+    },
+    "Oceanic Serenity": {
+        "face_colors": {
+            "U": (0.95, 0.98, 1.0),
+            "D": (0.8, 0.89, 0.94),
+            "R": (0.42, 0.61, 0.75),
+            "L": (0.48, 0.76, 0.77),
+            "F": (0.36, 0.71, 0.81),
+            "B": (0.16, 0.23, 0.42),
+        },
+        "background": (
+            (0.08, 0.13, 0.19),
+            (0.14, 0.21, 0.29),
+            (0.05, 0.08, 0.13),
+        ),
+    },
+    "Retro 80s Neon": {
+        "face_colors": {
+            "U": (0.86, 0.82, 0.97),
+            "D": (0.72, 0.92, 1.0),
+            "R": (0.62, 0.28, 0.86),
+            "L": (1.0, 0.73, 0.22),
+            "F": (1.0, 0.44, 0.2),
+            "B": (0.23, 0.84, 0.96),
+        },
+        "background": (
+            (0.14, 0.07, 0.2),
+            (0.23, 0.12, 0.31),
+            (0.07, 0.03, 0.11),
+        ),
+    },
+    "Sophisticated Pastels": {
+        "face_colors": {
+            "U": (0.99, 0.97, 0.95),
+            "D": (1.0, 0.86, 0.78),
+            "R": (0.92, 0.68, 0.78),
+            "L": (0.75, 0.86, 0.74),
+            "F": (0.66, 0.79, 0.91),
+            "B": (0.83, 0.74, 0.9),
+        },
+        "background": (
+            (0.27, 0.24, 0.26),
+            (0.39, 0.35, 0.38),
+            (0.15, 0.13, 0.15),
+        ),
+    },
+    "Royal Elegance": {
+        "face_colors": {
+            "U": (0.97, 0.96, 0.98),
+            "D": (0.93, 0.88, 0.7),
+            "R": (0.45, 0.33, 0.61),
+            "L": (0.69, 0.61, 0.77),
+            "F": (0.78, 0.74, 0.78),
+            "B": (0.95, 0.87, 0.91),
+        },
+        "background": (
+            (0.16, 0.14, 0.19),
+            (0.25, 0.22, 0.3),
+            (0.09, 0.08, 0.12),
+        ),
+    },
+}
 
 # MOVE_HISTORY is still useful as a fallback, but solving now prefers the
 # logical cube-state search rather than relying on session history alone.
 MOVE_HISTORY = []
+MOVE_HISTORY_FRAMES = []
+MOVE_HISTORY_BASE_FRAME = 1
+MOVE_HISTORY_INDEX = 0
+VISIBLE_HISTORY_LENGTH = 0
 TRACK_MOVES = True
 SOLVER_MAX_DEPTH = 14
 SOLVER_MAX_NODES = 2000000
@@ -142,6 +340,57 @@ SCRAMBLE_BUTTON = "scrambleButton"
 SCRAMBLE_ACTIVE = False
 SCRAMBLE_STOP_REQUESTED = False
 SCRAMBLE_PENDING_MOVES = []
+SCRAMBLE_CACHE_WAS_ENABLED = None
+ALGORITHM_RUN_ACTIVE = False
+ALGORITHM_RUN_STOP_REQUESTED = False
+ALGORITHM_RUN_PENDING_MOVES = []
+PLAYBACK_ACTIVE = False
+PLAYBACK_STOP_REQUESTED = False
+PLAYBACK_SCRUB_UPDATING = False
+SLIDER_GROUP_LABEL_WIDTH = 90
+SLIDER_GROUP_FIELD_WIDTH = 45
+BUILD_CUBE_BUTTON = "buildCubeButton"
+CONTROLS_BUTTON = "controlsButton"
+SOLVE_SETTINGS_SECTION = "solveSettingsSection"
+MOVE_BUTTONS_SECTION = "moveButtonsSection"
+ORIENTATION_SECTION = "orientationSection"
+ACTION_SECTION = "actionSection"
+ALGORITHM_SECTION = "algorithmSection"
+PLAYBACK_SECTION = "playbackSection"
+RESET_SECTION = "resetSection"
+AESTHETICS_POLISH_SECTION = "aestheticsPolishSection"
+AESTHETICS_CONTROLS_SECTION = "aestheticsControlsSection"
+AESTHETICS_ENVIRONMENT_SECTION = "aestheticsEnvironmentSection"
+AESTHETICS_THEME_SECTION = "aestheticsThemeSection"
+AESTHETICS_BEVEL_SECTION = "aestheticsBevelSection"
+PRESENTATION_MANAGED_CONTROLS = (
+    BUILD_CUBE_BUTTON,
+    CONTROLS_BUTTON,
+    ORIENTATION_SECTION,
+    ALGORITHM_SECTION,
+    PLAYBACK_SECTION,
+    RESET_SECTION,
+)
+DEFAULT_VIEWPORT_BACKGROUND = {}
+VISUAL_REFRESH_TOKEN = 0
+
+MOVE_BUTTON_TOOLTIPS = {
+    "U": "Rotate the world-up face clockwise.",
+    "D": "Rotate the world-down face clockwise.",
+    "R": "Rotate the world-right face clockwise.",
+    "L": "Rotate the world-left face clockwise.",
+    "F": "Rotate the world-front face clockwise.",
+    "B": "Rotate the world-back face clockwise.",
+}
+
+ROTATION_BUTTON_TOOLTIPS = {
+    "X": "Rotate the whole cube around the X axis.",
+    "X'": "Rotate the whole cube around the X axis in reverse.",
+    "Y": "Rotate the whole cube around the Y axis.",
+    "Y'": "Rotate the whole cube around the Y axis in reverse.",
+    "Z": "Rotate the whole cube around the Z axis.",
+    "Z'": "Rotate the whole cube around the Z axis in reverse.",
+}
 
 
 # Return the standalone solver core module when it is importable from disk.
@@ -155,57 +404,37 @@ def get_standalone_solver_core():
     search_directories = []
     seen_directories = set()
 
-    def add_search_directory(path):
-        if not path:
-            return
-
-        normalized_path = os.path.abspath(path)
-        if os.path.isfile(normalized_path):
-            normalized_path = os.path.dirname(normalized_path)
-        if not os.path.isdir(normalized_path):
-            return
-
-        directory_key = os.path.normcase(normalized_path)
-        if directory_key in seen_directories:
-            return
-
-        seen_directories.add(directory_key)
-        search_directories.append(normalized_path)
-
     # Maya does not always execute scripts like normal Python modules. Search a
     # few likely roots and remember successful hits in an optionVar so the
     # standalone solver can still be found after Script Editor execution.
-    add_search_directory(SCRIPT_DIRECTORY)
-    add_search_directory(getattr(sys.modules.get(__name__), "__file__", None))
+    add_search_directory(search_directories, seen_directories, SCRIPT_DIRECTORY)
+    add_search_directory(search_directories, seen_directories, getattr(sys.modules.get(__name__), "__file__", None))
     code_object = getattr(get_standalone_solver_core, "__code__", None)
     if code_object is not None:
-        add_search_directory(code_object.co_filename)
-    add_search_directory(os.getcwd())
-    add_search_directory(os.environ.get("RUBIKS_CUBE_TOOL_DIR"))
+        add_search_directory(search_directories, seen_directories, code_object.co_filename)
+    add_search_directory(search_directories, seen_directories, os.getcwd())
+    add_search_directory(search_directories, seen_directories, os.environ.get("RUBIKS_CUBE_TOOL_DIR"))
     try:
-        add_search_directory(cmds.internalVar(userScriptDir=True))
+        add_search_directory(search_directories, seen_directories, cmds.internalVar(userScriptDir=True))
     except Exception:
         pass
     try:
         if cmds.optionVar(exists=TOOL_DIRECTORY_OPTIONVAR):
-            add_search_directory(cmds.optionVar(q=TOOL_DIRECTORY_OPTIONVAR))
+            add_search_directory(search_directories, seen_directories, cmds.optionVar(q=TOOL_DIRECTORY_OPTIONVAR))
     except Exception:
         pass
 
     for path in os.environ.get("MAYA_SCRIPT_PATH", "").split(os.pathsep):
-        add_search_directory(path)
+        add_search_directory(search_directories, seen_directories, path)
     for path in sys.path:
-        add_search_directory(path)
+        add_search_directory(search_directories, seen_directories, path)
 
-    for directory in search_directories:
-        candidate_path = os.path.join(directory, module_name + ".py")
-        if os.path.exists(candidate_path):
-            module_path = candidate_path
-            try:
-                cmds.optionVar(sv=(TOOL_DIRECTORY_OPTIONVAR, directory))
-            except Exception:
-                pass
-            break
+    module_path = find_module_file(module_name, search_directories)
+    if module_path:
+        try:
+            cmds.optionVar(sv=(TOOL_DIRECTORY_OPTIONVAR, os.path.dirname(module_path)))
+        except Exception:
+            pass
 
     try:
         if module_path:
@@ -216,17 +445,7 @@ def get_standalone_solver_core():
                 or module_mtime != STANDALONE_SOLVER_MODULE_MTIME
                 or os.path.abspath(getattr(standalone_solver_core, "__file__", "")) != module_path
             ):
-                module_spec = importlib.util.spec_from_file_location(module_name, module_path)
-                if module_spec is None or module_spec.loader is None:
-                    raise ImportError(
-                        "Could not build an import spec for {0}".format(module_path)
-                    )
-
-                # Load directly from the discovered file path rather than
-                # relying on Maya's import state to mirror a normal package.
-                standalone_solver_core = importlib.util.module_from_spec(module_spec)
-                sys.modules[module_name] = standalone_solver_core
-                module_spec.loader.exec_module(standalone_solver_core)
+                standalone_solver_core = load_module_from_file(module_name, module_path)
             STANDALONE_SOLVER_MODULE_MTIME = module_mtime
         elif standalone_solver_core is None:
             standalone_solver_core = importlib.import_module(module_name)
@@ -268,8 +487,32 @@ BEVEL_FRACTION = 0.04
 BEVEL_SEGMENTS = 4
 BEVEL_MITERING = 2 # 0=none, 1=uniform, 2=patch (best)
 BEVEL_CHAMFER = True
-
-SHADER_TYPE = "aiStandardSurface" # Or "lambert"
+THEME_NAME = "Classic"
+GAP_SPACING = 0.06
+STICKER_SCALE = 0.82
+STICKER_THICKNESS = 0.04
+STICKER_ROUNDNESS = 0.025
+CONTROL_SIZE = 1.0
+CONTROL_OPACITY = 0.75
+SHOW_VIEWPORT_BACKGROUND = False
+SHOW_FLOOR_GRID = True
+PRESENTATION_MODE = False
+DEFAULT_NON_THEME_VISUAL_SETTINGS = {
+    "gap_spacing": 0.06,
+    "sticker_scale": 0.82,
+    "sticker_thickness": 0.04,
+    "sticker_roundness": 0.025,
+    "control_size": 1.0,
+    "control_opacity": 0.75,
+    "show_viewport_background": False,
+    "show_floor_grid": True,
+    "presentation_mode": False,
+    "bevel_enabled": True,
+    "bevel_fraction": 0.04,
+    "bevel_segments": 4,
+    "bevel_mitering": 2,
+    "bevel_chamfer": True,
+}
 
 # -------------------------
 # UI Settings Callbacks
@@ -299,24 +542,336 @@ def set_bevel_chamfer(val):
     global BEVEL_CHAMFER
     BEVEL_CHAMFER = val
 
-# Store which shader type new materials should use.
-def set_shader_type(val):
-    global SHADER_TYPE
-    SHADER_TYPE = val
+def set_gap_spacing(val):
+    global GAP_SPACING
+    GAP_SPACING = val
+
+
+def set_sticker_scale(val):
+    global STICKER_SCALE
+    STICKER_SCALE = val
+
+
+def set_sticker_thickness(val):
+    global STICKER_THICKNESS
+    STICKER_THICKNESS = val
+
+
+def set_sticker_roundness(val):
+    global STICKER_ROUNDNESS
+    STICKER_ROUNDNESS = val
+
+
+def set_control_size(val):
+    global CONTROL_SIZE
+    CONTROL_SIZE = val
+
+
+def set_control_opacity(val):
+    global CONTROL_OPACITY
+    CONTROL_OPACITY = val
+
+
+def set_show_viewport_background(val):
+    global SHOW_VIEWPORT_BACKGROUND
+    SHOW_VIEWPORT_BACKGROUND = val
+
+
+def set_show_floor_grid(val):
+    global SHOW_FLOOR_GRID
+    SHOW_FLOOR_GRID = val
+
+
+def set_presentation_mode(val):
+    global PRESENTATION_MODE
+    PRESENTATION_MODE = val
+
+
+def apply_theme(theme_name):
+    global THEME_NAME
+    if theme_name not in THEME_PRESETS:
+        return
+
+    THEME_NAME = theme_name
+    FACE_COLORS.update(THEME_PRESETS[theme_name]["face_colors"])
+
+
+def rebuild_cube_from_visual_settings():
+    create_rubiks_cube(preserve_scene_state=True)
+
+
+def rebuild_viewport_controls_from_settings():
+    if cmds.objExists("rubik_controls_grp"):
+        setup_viewport_controls()
+
+
+def schedule_visual_refresh(rebuild_cube=False, rebuild_controls=False, refresh_controls=False, delay_ms=120):
+    global VISUAL_REFRESH_TOKEN
+
+    VISUAL_REFRESH_TOKEN += 1
+    refresh_token = VISUAL_REFRESH_TOKEN
+
+    def run_refresh():
+        if refresh_token != VISUAL_REFRESH_TOKEN:
+            return
+
+        if rebuild_cube:
+            create_rubiks_cube(preserve_scene_state=True)
+            return
+
+        if rebuild_controls:
+            rebuild_viewport_controls_from_settings()
+        elif refresh_controls:
+            refresh_control_materials()
+
+        apply_viewport_background()
+        apply_floor_grid_visibility()
+
+    if QtCore is not None and delay_ms > 0:
+        QtCore.QTimer.singleShot(delay_ms, run_refresh)
+        return
+
+    maya_utils.executeDeferred(run_refresh)
+
+
+def capture_default_viewport_background():
+    if DEFAULT_VIEWPORT_BACKGROUND:
+        return
+
+    for color_name in ("background", "backgroundTop", "backgroundBottom"):
+        try:
+            DEFAULT_VIEWPORT_BACKGROUND[color_name] = tuple(
+                cmds.displayRGBColor(color_name, q=True)
+            )
+        except Exception:
+            return
+
+
+def apply_viewport_background():
+    capture_default_viewport_background()
+
+    if not DEFAULT_VIEWPORT_BACKGROUND:
+        return
+
+    if SHOW_VIEWPORT_BACKGROUND:
+        background_top, background_mid, background_bottom = THEME_PRESETS[THEME_NAME]["background"]
+        cmds.displayRGBColor("backgroundTop", *background_top)
+        cmds.displayRGBColor("background", *background_mid)
+        cmds.displayRGBColor("backgroundBottom", *background_bottom)
+        return
+
+    for color_name, color_value in DEFAULT_VIEWPORT_BACKGROUND.items():
+        cmds.displayRGBColor(color_name, *color_value)
+
+
+def apply_floor_grid_visibility():
+    try:
+        cmds.grid(toggle=SHOW_FLOOR_GRID)
+    except Exception:
+        pass
+
+
+def refresh_control_materials():
+    for ctrl_name in ("ctrl_U", "ctrl_D", "ctrl_R", "ctrl_L", "ctrl_F", "ctrl_B"):
+        if not cmds.objExists(ctrl_name):
+            continue
+
+        logical_face = get_face_from_control_position(ctrl_name)
+        color = FACE_COLORS.get(logical_face, (1, 1, 1))
+        shader_name = ctrl_name + "_fill_mat"
+        if cmds.objExists(shader_name):
+            cmds.setAttr(shader_name + ".baseColor", *color, type="double3")
+            cmds.setAttr(
+                shader_name + ".opacity",
+                CONTROL_OPACITY,
+                CONTROL_OPACITY,
+                CONTROL_OPACITY,
+                type="double3",
+            )
+
+        for shape in cmds.listRelatives(ctrl_name, shapes=True, fullPath=True) or []:
+            if cmds.nodeType(shape) != "nurbsCurve":
+                continue
+            cmds.setAttr(shape + ".overrideEnabled", 1)
+            cmds.setAttr(shape + ".overrideRGBColors", 1)
+            cmds.setAttr(shape + ".overrideColorRGB", *color)
+            cmds.setAttr(shape + ".lineWidth", max(1.0, 2.0 * CONTROL_SIZE))
+
+
+def set_ui_element_visibility(element_name, visible):
+    if cmds.control(element_name, exists=True):
+        cmds.control(element_name, e=True, manage=visible, visible=visible)
+        return
+
+    if cmds.layout(element_name, exists=True):
+        cmds.layout(element_name, e=True, manage=visible, visible=visible)
+
+
+def update_presentation_mode_ui():
+    for control_name in PRESENTATION_MANAGED_CONTROLS:
+        set_ui_element_visibility(control_name, not PRESENTATION_MODE)
+
+
+def sync_visual_settings_ui():
+    if cmds.control("gapSpacingSlider", exists=True):
+        cmds.floatSliderGrp("gapSpacingSlider", e=True, value=GAP_SPACING)
+    if cmds.control("stickerScaleSlider", exists=True):
+        cmds.floatSliderGrp("stickerScaleSlider", e=True, value=STICKER_SCALE)
+    if cmds.control("stickerThicknessSlider", exists=True):
+        cmds.floatSliderGrp("stickerThicknessSlider", e=True, value=STICKER_THICKNESS)
+    if cmds.control("stickerRoundnessSlider", exists=True):
+        cmds.floatSliderGrp("stickerRoundnessSlider", e=True, value=STICKER_ROUNDNESS)
+    if cmds.control("controlSizeSlider", exists=True):
+        cmds.floatSliderGrp("controlSizeSlider", e=True, value=CONTROL_SIZE)
+    if cmds.control("controlOpacitySlider", exists=True):
+        cmds.floatSliderGrp("controlOpacitySlider", e=True, value=CONTROL_OPACITY)
+    if cmds.control("viewportBackgroundToggle", exists=True):
+        cmds.checkBox("viewportBackgroundToggle", e=True, value=SHOW_VIEWPORT_BACKGROUND)
+    if cmds.control("floorGridToggle", exists=True):
+        cmds.checkBox("floorGridToggle", e=True, value=SHOW_FLOOR_GRID)
+    if cmds.control("presentationModeToggle", exists=True):
+        cmds.checkBox("presentationModeToggle", e=True, value=PRESENTATION_MODE)
+    if cmds.control("bevelToggle", exists=True):
+        cmds.checkBox("bevelToggle", e=True, value=BEVEL_ENABLED)
+    if cmds.control("bevelFraction", exists=True):
+        cmds.floatSliderGrp("bevelFraction", e=True, value=BEVEL_FRACTION)
+    if cmds.control("bevelSegments", exists=True):
+        cmds.intSliderGrp("bevelSegments", e=True, value=BEVEL_SEGMENTS)
+    if cmds.control("chamferToggle", exists=True):
+        cmds.checkBox("chamferToggle", e=True, value=BEVEL_CHAMFER)
+    if cmds.control("miteringDropdown", exists=True):
+        cmds.optionMenu("miteringDropdown", e=True, value=str(BEVEL_MITERING))
+def reset_aesthetics_to_defaults(*_unused):
+    global GAP_SPACING
+    global STICKER_SCALE
+    global STICKER_THICKNESS
+    global STICKER_ROUNDNESS
+    global CONTROL_SIZE
+    global CONTROL_OPACITY
+    global SHOW_VIEWPORT_BACKGROUND
+    global SHOW_FLOOR_GRID
+    global PRESENTATION_MODE
+    global BEVEL_ENABLED
+    global BEVEL_FRACTION
+    global BEVEL_SEGMENTS
+    global BEVEL_MITERING
+    global BEVEL_CHAMFER
+
+    GAP_SPACING = DEFAULT_NON_THEME_VISUAL_SETTINGS["gap_spacing"]
+    STICKER_SCALE = DEFAULT_NON_THEME_VISUAL_SETTINGS["sticker_scale"]
+    STICKER_THICKNESS = DEFAULT_NON_THEME_VISUAL_SETTINGS["sticker_thickness"]
+    STICKER_ROUNDNESS = DEFAULT_NON_THEME_VISUAL_SETTINGS["sticker_roundness"]
+    CONTROL_SIZE = DEFAULT_NON_THEME_VISUAL_SETTINGS["control_size"]
+    CONTROL_OPACITY = DEFAULT_NON_THEME_VISUAL_SETTINGS["control_opacity"]
+    SHOW_VIEWPORT_BACKGROUND = DEFAULT_NON_THEME_VISUAL_SETTINGS["show_viewport_background"]
+    SHOW_FLOOR_GRID = DEFAULT_NON_THEME_VISUAL_SETTINGS["show_floor_grid"]
+    PRESENTATION_MODE = DEFAULT_NON_THEME_VISUAL_SETTINGS["presentation_mode"]
+    BEVEL_ENABLED = DEFAULT_NON_THEME_VISUAL_SETTINGS["bevel_enabled"]
+    BEVEL_FRACTION = DEFAULT_NON_THEME_VISUAL_SETTINGS["bevel_fraction"]
+    BEVEL_SEGMENTS = DEFAULT_NON_THEME_VISUAL_SETTINGS["bevel_segments"]
+    BEVEL_MITERING = DEFAULT_NON_THEME_VISUAL_SETTINGS["bevel_mitering"]
+    BEVEL_CHAMFER = DEFAULT_NON_THEME_VISUAL_SETTINGS["bevel_chamfer"]
+
+    sync_visual_settings_ui()
+    apply_viewport_background()
+    apply_floor_grid_visibility()
+    update_presentation_mode_ui()
+    schedule_visual_refresh(rebuild_cube=True, delay_ms=0)
+
+
+def on_theme_changed(theme_name):
+    apply_theme(theme_name)
+    apply_viewport_background()
+    rebuild_cube_from_visual_settings()
+
+
+def on_control_opacity_changed(live_update=True):
+    global CONTROL_OPACITY
+
+    CONTROL_OPACITY = cmds.floatSliderGrp("controlOpacitySlider", q=True, value=True)
+    schedule_visual_refresh(
+        refresh_controls=True,
+        delay_ms=120 if live_update else 0,
+    )
+
+
+def on_control_size_changed(live_update=True):
+    global CONTROL_SIZE
+
+    CONTROL_SIZE = cmds.floatSliderGrp("controlSizeSlider", q=True, value=True)
+    schedule_visual_refresh(
+        rebuild_controls=True,
+        delay_ms=120 if live_update else 0,
+    )
+
+
+def on_gap_spacing_changed(live_update=True):
+    global GAP_SPACING
+
+    GAP_SPACING = cmds.floatSliderGrp("gapSpacingSlider", q=True, value=True)
+    schedule_visual_refresh(
+        rebuild_cube=True,
+        delay_ms=120 if live_update else 0,
+    )
+
+
+def on_sticker_scale_changed(live_update=True):
+    global STICKER_SCALE
+
+    STICKER_SCALE = cmds.floatSliderGrp("stickerScaleSlider", q=True, value=True)
+    schedule_visual_refresh(
+        rebuild_cube=True,
+        delay_ms=120 if live_update else 0,
+    )
+
+
+def on_sticker_thickness_changed(live_update=True):
+    global STICKER_THICKNESS
+
+    STICKER_THICKNESS = cmds.floatSliderGrp("stickerThicknessSlider", q=True, value=True)
+    schedule_visual_refresh(
+        rebuild_cube=True,
+        delay_ms=120 if live_update else 0,
+    )
+
+
+def on_sticker_roundness_changed(live_update=True):
+    global STICKER_ROUNDNESS
+
+    STICKER_ROUNDNESS = cmds.floatSliderGrp("stickerRoundnessSlider", q=True, value=True)
+    schedule_visual_refresh(
+        rebuild_cube=True,
+        delay_ms=120 if live_update else 0,
+    )
+
+
+def on_floor_grid_toggled(value):
+    set_show_floor_grid(value)
+    apply_floor_grid_visibility()
+
+
+def on_viewport_background_toggled(value):
+    set_show_viewport_background(value)
+    apply_viewport_background()
+
+
+def on_presentation_mode_toggled(value):
+    set_presentation_mode(value)
+    update_presentation_mode_ui()
     
 # React to bevel width changes and rebuild the cube.
 def on_bevel_fraction_changed():
     global BEVEL_FRACTION
 
     BEVEL_FRACTION = cmds.floatSliderGrp("bevelFraction", q=True, value=True)
-    create_rubiks_cube()
+    create_rubiks_cube(preserve_scene_state=True)
 
 # React to bevel segment changes and rebuild the cube.
 def on_bevel_segments_changed():
     global BEVEL_SEGMENTS
 
     BEVEL_SEGMENTS = cmds.intSliderGrp("bevelSegments", q=True, value=True)
-    create_rubiks_cube()
+    create_rubiks_cube(preserve_scene_state=True)
 
 # -------------------------
 # Material Helpers
@@ -333,13 +888,12 @@ def create_material(name, color):
 
     # Create shader if missing
     if not shader_exists:
-        shader = cmds.shadingNode(SHADER_TYPE, asShader=True, name=name)
-        if SHADER_TYPE == "aiStandardSurface":
-            cmds.setAttr(shader + ".baseColor", *color, type="double3")
-        elif SHADER_TYPE == "lambert":
-            cmds.setAttr(shader + ".color", *color, type="double3")
+        shader = cmds.shadingNode("aiStandardSurface", asShader=True, name=name)
     else:
         shader = name
+
+    if cmds.attributeQuery("baseColor", node=shader, exists=True):
+        cmds.setAttr(shader + ".baseColor", *color, type="double3")
 
     # Create SG if missing
     if not sg_exists:
@@ -360,13 +914,14 @@ def create_material(name, color):
 # -------------------------
 # Build the material lookup used when coloring cubies.
 def setup_materials():
+    face_colors = THEME_PRESETS[THEME_NAME]["face_colors"]
     return {
-        "white": create_material("rubiks_white", (1, 1, 1)),
-        "yellow": create_material("rubiks_yellow", (1, 1, 0)),
-        "red": create_material("rubiks_red", (1, 0, 0)),
-        "orange": create_material("rubiks_orange", (1, 0.5, 0)),
-        "blue": create_material("rubiks_blue", (0, 0, 1)),
-        "green": create_material("rubiks_green", (0, 1, 0)),
+        "white": create_material("rubiks_white", face_colors["U"]),
+        "yellow": create_material("rubiks_yellow", face_colors["D"]),
+        "red": create_material("rubiks_red", face_colors["F"]),
+        "orange": create_material("rubiks_orange", face_colors["B"]),
+        "blue": create_material("rubiks_blue", face_colors["R"]),
+        "green": create_material("rubiks_green", face_colors["L"]),
         "black": create_material("rubiks_black", (0.02, 0.02, 0.02)),
     }
     
@@ -377,46 +932,207 @@ def setup_materials():
 def assign_face_materials(cube, materials, pos):
     faces = cmds.polyEvaluate(cube, face=True)
     
-    # Make everything black first
+    # With separate sticker geometry, the cubie body should read as dark
+    # plastic rather than competing with the sticker colors underneath.
     for i in range(faces):
         cmds.sets(
-        f"{cube}.f[{i}]",
-        e=True,
-        forceElement=materials["black"][1]
+            f"{cube}.f[{i}]",
+            e=True,
+            forceElement=materials["black"][1]
+        )
+
+
+def get_visible_face_specs(pos):
+    face_specs = []
+    if pos[1] == 1:
+        face_specs.append(((0, 1, 0), "white"))
+    if pos[1] == -1:
+        face_specs.append(((0, -1, 0), "yellow"))
+    if pos[0] == 1:
+        face_specs.append(((1, 0, 0), "blue"))
+    if pos[0] == -1:
+        face_specs.append(((-1, 0, 0), "green"))
+    if pos[2] == 1:
+        face_specs.append(((0, 0, 1), "red"))
+    if pos[2] == -1:
+        face_specs.append(((0, 0, -1), "orange"))
+    return face_specs
+
+
+def build_sticker_outline_points(sticker_size, corner_radius):
+    half_size = sticker_size * 0.5
+    radius = max(0.0, min(corner_radius, half_size))
+
+    if radius <= 1e-5:
+        return [
+            (-half_size, half_size, 0.0),
+            (half_size, half_size, 0.0),
+            (half_size, -half_size, 0.0),
+            (-half_size, -half_size, 0.0),
+        ]
+
+    if radius >= half_size - 1e-5:
+        points = []
+        circle_steps = 28
+        for index in range(circle_steps):
+            angle = (math.pi * 2.0 * float(index)) / float(circle_steps)
+            points.append(
+                (
+                    math.cos(angle) * half_size,
+                    math.sin(angle) * half_size,
+                    0.0,
+                )
+            )
+        return points
+
+    arc_steps = max(4, int(5 + ((radius / half_size) * 7.0)))
+    points = []
+    corner_specs = (
+        ((half_size - radius, half_size - radius), 0.0, math.pi * 0.5),
+        ((-half_size + radius, half_size - radius), math.pi * 0.5, math.pi),
+        ((-half_size + radius, -half_size + radius), math.pi, math.pi * 1.5),
+        ((half_size - radius, -half_size + radius), math.pi * 1.5, math.pi * 2.0),
     )
 
-    # Overwrite visible faces with appropriate shader
-    for i in range(faces):
-        face = f"{cube}.f[{i}]"
+    for corner_index, (center, start_angle, end_angle) in enumerate(corner_specs):
+        for step_index in range(arc_steps + 1):
+            if corner_index > 0 and step_index == 0:
+                continue
+            blend = float(step_index) / float(arc_steps)
+            angle = start_angle + ((end_angle - start_angle) * blend)
+            points.append(
+                (
+                    center[0] + (math.cos(angle) * radius),
+                    center[1] + (math.sin(angle) * radius),
+                    0.0,
+                )
+            )
 
-        # Get normal properly
-        info = cmds.polyInfo(face, fn=True)[0].split()
-        nx, ny, nz = float(info[2]), float(info[3]), float(info[4])
+    return points
 
-        # Use tolerance
-        if ny > 0.99 and pos[1] == 1:
-            cmds.sets(face, e=True, forceElement=materials["white"][1])
 
-        elif ny < -0.99 and pos[1] == -1:
-            cmds.sets(face, e=True, forceElement=materials["yellow"][1])
+def create_sticker_mesh(name, normal, sticker_size, sticker_depth, sticker_roundness):
+    outline_points = build_sticker_outline_points(
+        sticker_size,
+        sticker_roundness,
+    )
+    sticker = cmds.polyCreateFacet(
+        p=outline_points,
+        ch=False,
+        name=name,
+    )[0]
+    front_face_info = cmds.polyInfo(sticker + ".f[0]", fn=True) or []
+    if front_face_info:
+        values = front_face_info[0].split()
+        if float(values[4]) < 0.0:
+            cmds.polyNormal(sticker, normalMode=0, userNormalMode=0)
+    cmds.polyExtrudeFacet(
+        sticker + ".f[0]",
+        localTranslateZ=sticker_depth,
+    )
+    cmds.delete(sticker, constructionHistory=True)
+    cmds.xform(sticker, os=True, t=(0.0, 0.0, -(sticker_depth * 0.5)))
 
-        elif nx > 0.99 and pos[0] == 1:
-            cmds.sets(face, e=True, forceElement=materials["blue"][1])
+    if normal == (1, 0, 0):
+        cmds.rotate(0, 90, 0, sticker, os=True)
+    elif normal == (-1, 0, 0):
+        cmds.rotate(0, -90, 0, sticker, os=True)
+    elif normal == (0, 1, 0):
+        cmds.rotate(-90, 0, 0, sticker, os=True)
+    elif normal == (0, -1, 0):
+        cmds.rotate(90, 0, 0, sticker, os=True)
+    elif normal == (0, 0, -1):
+        cmds.rotate(180, 0, 0, sticker, os=True)
 
-        elif nx < -0.99 and pos[0] == -1:
-            cmds.sets(face, e=True, forceElement=materials["green"][1])
+    cmds.makeIdentity(sticker, apply=True, t=1, r=1, s=1)
+    # Keep the cap-to-side transition crisp while preserving smoothing around
+    # the rounded perimeter segments.
+    cmds.polySoftEdge(sticker, angle=60)
+    for shape in cmds.listRelatives(sticker, shapes=True, fullPath=True) or []:
+        if cmds.nodeType(shape) != "mesh":
+            continue
+        cmds.setAttr(shape + ".doubleSided", 1)
+        cmds.setAttr(shape + ".opposite", 0)
+    return sticker
 
-        elif nz > 0.99 and pos[2] == 1:
-            cmds.sets(face, e=True, forceElement=materials["red"][1])
 
-        elif nz < -0.99 and pos[2] == -1:
-            cmds.sets(face, e=True, forceElement=materials["orange"][1])
+def get_sticker_position_for_face(cube, normal, sticker_depth):
+    bbox = cmds.exactWorldBoundingBox(cube)
+    center_x = (bbox[0] + bbox[3]) * 0.5
+    center_y = (bbox[1] + bbox[4]) * 0.5
+    center_z = (bbox[2] + bbox[5]) * 0.5
+    surface_padding = 0.001
+
+    if normal == (1, 0, 0):
+        return (bbox[3] + (sticker_depth * 0.5) + surface_padding, center_y, center_z)
+    if normal == (-1, 0, 0):
+        return (bbox[0] - (sticker_depth * 0.5) - surface_padding, center_y, center_z)
+    if normal == (0, 1, 0):
+        return (center_x, bbox[4] + (sticker_depth * 0.5) + surface_padding, center_z)
+    if normal == (0, -1, 0):
+        return (center_x, bbox[1] - (sticker_depth * 0.5) - surface_padding, center_z)
+    if normal == (0, 0, 1):
+        return (center_x, center_y, bbox[5] + (sticker_depth * 0.5) + surface_padding)
+    return (center_x, center_y, bbox[2] - (sticker_depth * 0.5) - surface_padding)
+
+
+def align_sticker_to_cubie_face(cube, sticker, normal):
+    cube_bbox = cmds.exactWorldBoundingBox(cube)
+    sticker_bbox = cmds.exactWorldBoundingBox(sticker)
+    tx, ty, tz = cmds.xform(sticker, q=True, ws=True, t=True)
+    surface_padding = 0.001
+
+    if normal == (1, 0, 0):
+        cmds.xform(sticker, ws=True, t=(tx + ((cube_bbox[3] + surface_padding) - sticker_bbox[0]), ty, tz))
+        return
+    if normal == (-1, 0, 0):
+        cmds.xform(sticker, ws=True, t=(tx + ((cube_bbox[0] - surface_padding) - sticker_bbox[3]), ty, tz))
+        return
+    if normal == (0, 1, 0):
+        cmds.xform(sticker, ws=True, t=(tx, ty + ((cube_bbox[4] + surface_padding) - sticker_bbox[1]), tz))
+        return
+    if normal == (0, -1, 0):
+        cmds.xform(sticker, ws=True, t=(tx, ty + ((cube_bbox[1] - surface_padding) - sticker_bbox[4]), tz))
+        return
+    if normal == (0, 0, 1):
+        cmds.xform(sticker, ws=True, t=(tx, ty, tz + ((cube_bbox[5] + surface_padding) - sticker_bbox[2])))
+        return
+    cmds.xform(sticker, ws=True, t=(tx, ty, tz + ((cube_bbox[2] - surface_padding) - sticker_bbox[5])))
+
+
+def add_stickers_to_cubie(cube, materials, pos, cubie_size):
+    sticker_size = max(0.05, cubie_size * STICKER_SCALE)
+    sticker_depth = max(0.005, STICKER_THICKNESS)
+
+    for normal, material_key in get_visible_face_specs(pos):
+        sticker = create_sticker_mesh(
+            name="{0}_{1}_sticker".format(cube, material_key),
+            normal=normal,
+            sticker_size=sticker_size,
+            sticker_depth=sticker_depth,
+            sticker_roundness=STICKER_ROUNDNESS,
+        )
+
+        sticker_position = get_sticker_position_for_face(cube, normal, sticker_depth)
+        cmds.xform(sticker, ws=True, t=sticker_position)
+        align_sticker_to_cubie_face(cube, sticker, normal)
+        cmds.polySoftEdge(sticker, angle=60)
+        cmds.sets(sticker, e=True, forceElement=materials[material_key][1])
+        cmds.parent(sticker, cube)
 
 # -------------------------
 # Cube Construction
 # -------------------------
 # Rebuild the full 3x3x3 Rubik's Cube mesh set.
-def create_rubiks_cube():
+def create_rubiks_cube(preserve_scene_state=False):
+    global MOVE_HISTORY_BASE_FRAME
+    global MOVE_HISTORY_INDEX
+    global VISIBLE_HISTORY_LENGTH
+
+    preserved_state = None
+    if preserve_scene_state and get_all_cubies():
+        preserved_state = snapshot_visual_rebuild_state()
+
     materials = setup_materials()
     
     # Delete old cubes
@@ -424,12 +1140,19 @@ def create_rubiks_cube():
     if existing:
         cmds.delete(existing)
     
-    size = 1.0 # change to affect spacing between cubies
+    size = max(0.35, SPACING - GAP_SPACING)
     
     for x in [-1, 0, 1]:
         for y in [-1, 0, 1]:
             for z in [-1, 0, 1]:
-                cube = cmds.polyCube(w=size, h=size, d=size, ch=False)[0]
+                cube_name = make_cubie_identity(x, y, z)
+                cube = cmds.polyCube(w=size, h=size, d=size, ch=False, name=cube_name)[0]
+                if not cmds.attributeQuery("isRubikCubie", node=cube, exists=True):
+                    cmds.addAttr(cube, longName="isRubikCubie", attributeType="bool")
+                cmds.setAttr(cube + ".isRubikCubie", 1)
+                if not cmds.attributeQuery("cubieId", node=cube, exists=True):
+                    cmds.addAttr(cube, longName="cubieId", dataType="string")
+                cmds.setAttr(cube + ".cubieId", cube_name, type="string")
                 
                 cmds.polySoftEdge(cube, angle=0)               
                 
@@ -457,17 +1180,29 @@ def create_rubiks_cube():
                 )
                 
                 assign_face_materials(cube, materials, (x, y, z))
+                add_stickers_to_cubie(cube, materials, (x, y, z), size)
 
     reset_orientation()
     initialize_solver_state()
-    MOVE_HISTORY.clear()
-    capture_initial_state()
-    update_ui_move_buttons()
+    if preserved_state is None:
+        MOVE_HISTORY.clear()
+        MOVE_HISTORY_FRAMES.clear()
+        MOVE_HISTORY_BASE_FRAME = 1
+        MOVE_HISTORY_INDEX = 0
+        VISIBLE_HISTORY_LENGTH = 0
+        sync_timeline_to_history_index(0)
+        capture_initial_state()
+        update_ui_move_buttons()
+        update_playback_ui()
+    else:
+        restore_visual_rebuild_state(preserved_state)
 
     if cmds.objExists("rubik_controls_grp"):
         setup_viewport_controls()
     else:
         reset_viewport_control_directions()
+    apply_viewport_background()
+    apply_floor_grid_visibility()
 
 # -------------------------
 # Scene State And Orientation
@@ -485,8 +1220,7 @@ def get_all_cubies():
         if "rubik_controls_grp" in parents:
             continue
 
-        shapes = cmds.listRelatives(obj, shapes=True)
-        if shapes and any(cmds.nodeType(shape) == "mesh" for shape in shapes):
+        if cmds.attributeQuery("isRubikCubie", node=obj, exists=True) and cmds.getAttr(obj + ".isRubikCubie"):
             cubies.append(obj)
 
     return cubies
@@ -558,9 +1292,18 @@ def ensure_initial_state():
 
 # Save the current pose as the new reset pose.
 def save_current_pose_as_initial_state(*_unused):
+    global MOVE_HISTORY_BASE_FRAME
+    global MOVE_HISTORY_INDEX
+    global VISIBLE_HISTORY_LENGTH
+
     capture_initial_state()
     save_solver_goal_from_current_state()
     MOVE_HISTORY.clear()
+    MOVE_HISTORY_FRAMES.clear()
+    MOVE_HISTORY_BASE_FRAME = get_current_frame()
+    MOVE_HISTORY_INDEX = 0
+    VISIBLE_HISTORY_LENGTH = 0
+    update_playback_ui()
     print("Saved current cube pose as the reset state")
 
 
@@ -664,6 +1407,7 @@ def get_mapped_move_for_world_button(world_face, direction):
 # Apply one logical cube move, optionally animating and tracking history.
 def apply_move(move_name, animate=None, start_frame=None, track_history=None):
     global CUBE_STATE
+    global MOVE_HISTORY_BASE_FRAME
 
     if move_name not in MOVES:
         print("Invalid move")
@@ -674,6 +1418,14 @@ def apply_move(move_name, animate=None, start_frame=None, track_history=None):
 
     if track_history is None:
         track_history = TRACK_MOVES
+
+    if track_history and not MOVE_HISTORY and MOVE_HISTORY_INDEX == 0:
+        if start_frame is not None:
+            MOVE_HISTORY_BASE_FRAME = start_frame
+        elif animate:
+            MOVE_HISTORY_BASE_FRAME = max(get_current_frame(), current_time)
+        else:
+            MOVE_HISTORY_BASE_FRAME = get_current_frame()
 
     world_axis, world_value, world_angle = get_world_rotation_for_move(move_name)
     if not rotate_slice(
@@ -686,10 +1438,12 @@ def apply_move(move_name, animate=None, start_frame=None, track_history=None):
         return False
 
     if track_history:
-        MOVE_HISTORY.append(move_name)
+        record_history_move(move_name)
+        sync_timeline_to_history_index()
 
     ensure_solver_state()
     CUBE_STATE = apply_move_to_cube_state(CUBE_STATE, move_name)
+    update_playback_ui()
     return True
 
 # -------------------------
@@ -842,6 +1596,155 @@ def get_animation_enabled():
     return True
 
 
+def get_move_duration():
+    global MOVE_DURATION
+
+    if cmds.control(MOVE_SPEED_SLIDER, exists=True):
+        MOVE_DURATION = cmds.intSliderGrp(MOVE_SPEED_SLIDER, q=True, value=True)
+    return MOVE_DURATION
+
+
+def is_busy_with_sequence():
+    return SCRAMBLE_ACTIVE or ALGORITHM_RUN_ACTIVE or PLAYBACK_ACTIVE
+
+
+def record_history_move(move_name):
+    global VISIBLE_HISTORY_LENGTH
+    global MOVE_HISTORY_INDEX
+
+    if MOVE_HISTORY_INDEX < len(MOVE_HISTORY):
+        del MOVE_HISTORY[MOVE_HISTORY_INDEX:]
+        del MOVE_HISTORY_FRAMES[MOVE_HISTORY_INDEX:]
+
+    MOVE_HISTORY.append(move_name)
+    MOVE_HISTORY_FRAMES.append(current_time)
+    MOVE_HISTORY_INDEX = len(MOVE_HISTORY)
+    VISIBLE_HISTORY_LENGTH = MOVE_HISTORY_INDEX
+
+
+def can_step_backward():
+    return MOVE_HISTORY_INDEX > 0
+
+
+def can_step_forward():
+    return MOVE_HISTORY_INDEX < len(MOVE_HISTORY)
+
+
+def get_history_frame(index=None):
+    if index is None:
+        index = MOVE_HISTORY_INDEX
+
+    if index <= 0 or not MOVE_HISTORY_FRAMES:
+        return MOVE_HISTORY_BASE_FRAME
+
+    clamped_index = min(index, len(MOVE_HISTORY_FRAMES))
+    return MOVE_HISTORY_FRAMES[clamped_index - 1]
+
+
+def sync_timeline_to_history_index(index=None):
+    global current_time
+
+    frame = get_history_frame(index)
+    current_time = frame
+    cmds.currentTime(frame)
+
+
+def can_use_keyed_history_scrub():
+    return bool(MOVE_HISTORY_FRAMES) and len(MOVE_HISTORY_FRAMES) == len(MOVE_HISTORY)
+
+
+def sync_logical_state_to_history_index(index):
+    global CUBE_STATE
+    global MOVE_HISTORY_INDEX
+
+    target_index = max(0, min(int(index), len(MOVE_HISTORY)))
+    history_state = SOLVED_CUBE_STATE
+    for move_name in MOVE_HISTORY[:target_index]:
+        history_state = apply_move_to_cube_state(history_state, move_name)
+
+    CUBE_STATE = history_state
+    MOVE_HISTORY_INDEX = target_index
+
+
+def restore_cube_to_history_base_state():
+    global current_time
+    global CURRENT_ORIENTATION
+    global CUBE_STATE
+
+    controls_enabled = cmds.objExists("rubik_controls_grp")
+    ensure_initial_state()
+    cubies = [cubie for cubie in INITIAL_STATE if cmds.objExists(cubie)]
+    if not cubies:
+        print("No saved initial state found")
+        return False
+
+    clear_transform_keys(cubies)
+    base_frame = get_history_frame(0)
+    cmds.currentTime(base_frame)
+
+    for cubie in cubies:
+        cmds.xform(cubie, ws=True, matrix=INITIAL_STATE[cubie])
+
+    if INITIAL_ORIENTATION:
+        CURRENT_ORIENTATION = {
+            axis: vector[:]
+            for axis, vector in INITIAL_ORIENTATION.items()
+        }
+    else:
+        reset_orientation()
+
+    ensure_solver_state()
+    CUBE_STATE = SOLVED_CUBE_STATE
+
+    if controls_enabled:
+        setup_viewport_controls()
+    else:
+        reset_viewport_control_directions()
+
+    update_ui_move_buttons()
+    current_time = base_frame
+    return True
+
+
+def rebuild_scene_to_history_index(target_index):
+    global MOVE_HISTORY_INDEX
+
+    target_index = max(0, min(int(target_index), len(MOVE_HISTORY)))
+    if not restore_cube_to_history_base_state():
+        return False
+
+    for move_name in MOVE_HISTORY[:target_index]:
+        if not apply_move(move_name, animate=False, track_history=False):
+            return False
+
+    MOVE_HISTORY_INDEX = target_index
+    sync_timeline_to_history_index()
+    update_playback_ui()
+    return True
+
+
+def get_move_button_tooltip(world_face, direction):
+    base_tooltip = MOVE_BUTTON_TOOLTIPS.get(world_face, "Rotate this face.")
+    if direction == 1:
+        return base_tooltip
+
+    if base_tooltip.endswith("."):
+        base_tooltip = base_tooltip[:-1]
+    return base_tooltip + " Use the inverse direction."
+
+
+def get_slider_group_layout_kwargs():
+    return {
+        "adjustableColumn": 3,
+        "columnWidth3": (
+            SLIDER_GROUP_LABEL_WIDTH,
+            SLIDER_GROUP_FIELD_WIDTH,
+            1,
+        ),
+        "columnAlign3": ("left", "left", "left"),
+    }
+
+
 # Remove translation/rotation keys from a cubie set.
 def clear_transform_keys(cubies, time_range=None):
     if not cubies:
@@ -853,6 +1756,150 @@ def clear_transform_keys(cubies, time_range=None):
 
     for attr in ANIMATED_ATTRS:
         cmds.cutKey(cubies, at=attr, **kwargs)
+
+
+def make_cubie_identity(x, y, z):
+    return "cubie_x{0}_y{1}_z{2}".format(int(x), int(y), int(z))
+
+
+def get_cubie_identity_from_matrix(matrix_values):
+    tx = matrix_values[12] / float(SPACING) if SPACING else matrix_values[12]
+    ty = matrix_values[13] / float(SPACING) if SPACING else matrix_values[13]
+    tz = matrix_values[14] / float(SPACING) if SPACING else matrix_values[14]
+
+    def clamp_axis(value):
+        return max(-1, min(1, int(round(value))))
+
+    return make_cubie_identity(clamp_axis(tx), clamp_axis(ty), clamp_axis(tz))
+
+
+def get_cubie_identity(cubie):
+    if cmds.attributeQuery("cubieId", node=cubie, exists=True):
+        cubie_id = cmds.getAttr(cubie + ".cubieId")
+        if cubie_id:
+            return cubie_id
+
+    if cubie in INITIAL_STATE:
+        return get_cubie_identity_from_matrix(INITIAL_STATE[cubie])
+
+    return get_cubie_identity_from_matrix(cmds.xform(cubie, q=True, ws=True, matrix=True))
+
+
+def capture_cubie_animation_data(cubies):
+    animation_data = {}
+
+    for cubie in cubies:
+        cubie_id = get_cubie_identity(cubie)
+        attr_data = {}
+        for attr in ANIMATED_ATTRS:
+            times = cmds.keyframe(cubie, at=attr, q=True, tc=True) or []
+            values = cmds.keyframe(cubie, at=attr, q=True, vc=True) or []
+            attr_data[attr] = list(zip(times, values))
+        animation_data[cubie_id] = attr_data
+
+    return animation_data
+
+
+def restore_cubie_animation_data(animation_data):
+    if not animation_data:
+        return
+
+    for cubie in get_all_cubies():
+        cubie_id = get_cubie_identity(cubie)
+        attr_data = animation_data.get(cubie_id)
+        if not attr_data:
+            continue
+
+        for attr, keys in attr_data.items():
+            for frame, value in keys:
+                cmds.setKeyframe(cubie, at=attr, t=frame, v=value)
+
+            if keys:
+                cmds.keyTangent(cubie, at=attr, itt="linear", ott="linear")
+
+
+def snapshot_visual_rebuild_state():
+    cubies = get_all_cubies()
+    return {
+        "current_frame": get_current_frame(),
+        "current_time": current_time,
+        "current_orientation": {
+            axis: vector[:]
+            for axis, vector in CURRENT_ORIENTATION.items()
+        },
+        "initial_orientation": {
+            axis: vector[:]
+            for axis, vector in INITIAL_ORIENTATION.items()
+        },
+        "initial_state": {
+            get_cubie_identity(cubie): matrix_values[:]
+            for cubie, matrix_values in INITIAL_STATE.items()
+        },
+        "current_matrices": {
+            get_cubie_identity(cubie): cmds.xform(cubie, q=True, ws=True, matrix=True)
+            for cubie in cubies
+        },
+        "animation_data": capture_cubie_animation_data(cubies),
+        "history": MOVE_HISTORY[:],
+        "history_frames": MOVE_HISTORY_FRAMES[:],
+        "history_base_frame": MOVE_HISTORY_BASE_FRAME,
+        "history_index": MOVE_HISTORY_INDEX,
+        "visible_history_length": VISIBLE_HISTORY_LENGTH,
+        "solver_goal_state": SOLVED_CUBE_STATE,
+        "cube_state": CUBE_STATE,
+    }
+
+
+def restore_visual_rebuild_state(state):
+    global INITIAL_STATE
+    global INITIAL_ORIENTATION
+    global CURRENT_ORIENTATION
+    global MOVE_HISTORY_BASE_FRAME
+    global MOVE_HISTORY_INDEX
+    global VISIBLE_HISTORY_LENGTH
+    global SOLVED_CUBE_STATE
+    global CUBE_STATE
+    global current_time
+
+    if not state:
+        return
+
+    INITIAL_STATE = {
+        cubie_id: matrix_values[:]
+        for cubie_id, matrix_values in state["initial_state"].items()
+        if cmds.objExists(cubie_id)
+    }
+    INITIAL_ORIENTATION = {
+        axis: vector[:]
+        for axis, vector in state["initial_orientation"].items()
+    }
+    CURRENT_ORIENTATION = {
+        axis: vector[:]
+        for axis, vector in state["current_orientation"].items()
+    }
+    MOVE_HISTORY[:] = state["history"]
+    MOVE_HISTORY_FRAMES[:] = state["history_frames"]
+    MOVE_HISTORY_BASE_FRAME = state["history_base_frame"]
+    MOVE_HISTORY_INDEX = state["history_index"]
+    VISIBLE_HISTORY_LENGTH = state["visible_history_length"]
+    SOLVED_CUBE_STATE = state["solver_goal_state"]
+    CUBE_STATE = state["cube_state"]
+    current_time = state["current_time"]
+
+    restore_cubie_animation_data(state["animation_data"])
+
+    if any(keys for attr_data in state["animation_data"].values() for keys in attr_data.values()):
+        cmds.currentTime(state["current_frame"])
+    else:
+        for cubie in get_all_cubies():
+            cubie_id = get_cubie_identity(cubie)
+            matrix_values = state["current_matrices"].get(cubie_id)
+            if matrix_values:
+                cmds.xform(cubie, ws=True, matrix=matrix_values)
+        cmds.currentTime(state["current_frame"])
+
+    update_ui_move_buttons()
+    update_playback_ui()
 
 
 # Set translation and rotation keys for a cubie set on one frame.
@@ -931,8 +1978,8 @@ def rotate_cubies(cubies, axis, angle, animate=True, start_frame=None, clear_fut
         current_time = get_current_frame()
         return
 
-    start = get_current_frame() if start_frame is None else start_frame
-    end = start + MOVE_DURATION
+    start = max(get_current_frame(), current_time) if start_frame is None else start_frame
+    end = start + get_move_duration()
     frame_count = max(1, end - start)
 
     # When animating a slice move, we snapshot every cubie in the scene so we
@@ -1032,13 +2079,25 @@ def create_control_fill_material(name, color):
         cmds.setAttr(shader + ".base", 1.0)
         cmds.setAttr(shader + ".baseColor", *color, type="double3")
         cmds.setAttr(shader + ".specular", 0.0)
-        cmds.setAttr(shader + ".opacity", 0.5, 0.5, 0.5, type="double3")
+        cmds.setAttr(
+            shader + ".opacity",
+            CONTROL_OPACITY,
+            CONTROL_OPACITY,
+            CONTROL_OPACITY,
+            type="double3",
+        )
     else:
         shader = shader_name
         cmds.setAttr(shader + ".base", 1.0)
         cmds.setAttr(shader + ".baseColor", *color, type="double3")
         cmds.setAttr(shader + ".specular", 0.0)
-        cmds.setAttr(shader + ".opacity", 0.75, 0.75, 0.75, type="double3")
+        cmds.setAttr(
+            shader + ".opacity",
+            CONTROL_OPACITY,
+            CONTROL_OPACITY,
+            CONTROL_OPACITY,
+            type="double3",
+        )
 
     if not cmds.objExists(sg_name):
         sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=sg_name)
@@ -1076,108 +2135,6 @@ def rotate_slice(axis="y", value=1, angle=90, animate=True, start_frame=None):
 # -------------------------
 # Move Definitions And Operations
 # -------------------------
-MOVES = {
-    "U": ("y", 1, -90),
-    "U'": ("y", 1, 90),
-    "D": ("y", -1, 90),
-    "D'": ("y", -1, -90),
-    "R": ("x", 1, -90),
-    "R'": ("x", 1, 90),
-    "L": ("x", -1, 90),
-    "L'": ("x", -1, -90),
-    "F": ("z", 1, -90),
-    "F'": ("z", 1, 90),
-    "B": ("z", -1, 90),
-    "B'": ("z", -1, -90),
-}
-
-CUBE_ROTATIONS = {
-    "X": ("x", -90),
-    "X'": ("x", 90),
-    "Y": ("y", -90),
-    "Y'": ("y", 90),
-    "Z": ("z", -90),
-    "Z'": ("z", 90),
-}
-
-FACE_VECTORS = {
-    "U": (0, 1, 0),
-    "D": (0, -1, 0),
-    "R": (1, 0, 0),
-    "L": (-1, 0, 0),
-    "F": (0, 0, 1),
-    "B": (0, 0, -1),
-}
-FACE_AXES = {
-    "U": "y",
-    "D": "y",
-    "R": "x",
-    "L": "x",
-    "F": "z",
-    "B": "z",
-}
-OPPOSITE_FACE_ORDER = {
-    "U": 0,
-    "D": 1,
-    "R": 0,
-    "L": 1,
-    "F": 0,
-    "B": 1,
-}
-SEARCH_MOVES = {
-    "U": MOVES["U"],
-    "U2": ("y", 1, 180),
-    "U'": MOVES["U'"],
-    "D": MOVES["D"],
-    "D2": ("y", -1, 180),
-    "D'": MOVES["D'"],
-    "R": MOVES["R"],
-    "R2": ("x", 1, 180),
-    "R'": MOVES["R'"],
-    "L": MOVES["L"],
-    "L2": ("x", -1, 180),
-    "L'": MOVES["L'"],
-    "F": MOVES["F"],
-    "F2": ("z", 1, 180),
-    "F'": MOVES["F'"],
-    "B": MOVES["B"],
-    "B2": ("z", -1, 180),
-    "B'": MOVES["B'"],
-}
-SEARCH_MOVE_NAMES = tuple(SEARCH_MOVES.keys())
-MOVE_EXPANSIONS = {
-    "U": ("U",),
-    "U2": ("U", "U"),
-    "U'": ("U'",),
-    "D": ("D",),
-    "D2": ("D", "D"),
-    "D'": ("D'",),
-    "R": ("R",),
-    "R2": ("R", "R"),
-    "R'": ("R'",),
-    "L": ("L",),
-    "L2": ("L", "L"),
-    "L'": ("L'",),
-    "F": ("F",),
-    "F2": ("F", "F"),
-    "F'": ("F'",),
-    "B": ("B",),
-    "B2": ("B", "B"),
-    "B'": ("B'",),
-}
-PHASE1_MOVE_NAMES = SEARCH_MOVE_NAMES
-PHASE2_MOVE_NAMES = (
-    "U",
-    "U2",
-    "U'",
-    "D",
-    "D2",
-    "D'",
-    "R2",
-    "L2",
-    "F2",
-    "B2",
-)
 PHASE1_MOVE_COUNT = len(PHASE1_MOVE_NAMES)
 PHASE2_MOVE_COUNT = len(PHASE2_MOVE_NAMES)
 CORNER_ORIENTATION_COUNT = 3 ** 7
@@ -1228,211 +2185,29 @@ FACTORIALS = (
     40320,
 )
 
-# Return the face letter for a move like R, R', or R2.
-def get_move_face(move_name):
-    return move_name[0]
-
-# Return the inverse of a move name, including 180-degree turns.
-def get_inverse_move(move_name):
-    if move_name.endswith("2"):
-        return move_name
-    if move_name.endswith("'"):
-        return move_name.replace("'", "")
-    return move_name + "'"
-
 INVERSE_MOVES = {
     move_name: get_inverse_move(move_name)
     for move_name in SEARCH_MOVE_NAMES
 }
 
-# Expand solver-only moves like R2 into quarter turns Maya can execute.
-def expand_solver_moves(move_names):
-    expanded = []
-    for move_name in move_names:
-        expanded.extend(MOVE_EXPANSIONS.get(move_name, (move_name,)))
-    return expanded
-
-# Apply safe search pruning rules to avoid obviously redundant branches.
-def should_prune_search_move(last_move, move_name):
-    if not last_move:
-        return False
-
-    last_face = get_move_face(last_move)
-    face = get_move_face(move_name)
-
-    # Same-face repeats are redundant once the search includes 180-degree turns.
-    if face == last_face:
-        return True
-
-    # Opposite-face turns on the same axis commute, so keep one canonical order.
-    if FACE_AXES[face] == FACE_AXES[last_face]:
-        return OPPOSITE_FACE_ORDER[face] < OPPOSITE_FACE_ORDER[last_face]
-
-    return False
-
-# Apply one search move to a single logical piece state.
-def apply_move_to_piece_state(piece_state, move_name):
-    axis, value, angle = SEARCH_MOVES[move_name]
-    axis_index = {"x": 0, "y": 1, "z": 2}[axis]
-    position = piece_state[0]
-    sticker_directions = piece_state[1:]
-
-    if position[axis_index] != value:
-        return piece_state
-
-    rotated_position = rotate_logical_vector(position, axis, angle)
-    rotated_directions = tuple(
-        rotate_logical_vector(direction, axis, angle)
-        for direction in sticker_directions
-    )
-    return (rotated_position,) + rotated_directions
-
-# Build the canonical list of logical corner and edge pieces.
 def build_solver_piece_metadata():
-    pieces = []
-
-    for x in (-1, 0, 1):
-        for y in (-1, 0, 1):
-            for z in (-1, 0, 1):
-                position = (x, y, z)
-                magnitude = abs(x) + abs(y) + abs(z)
-                if magnitude not in (2, 3):
-                    continue
-
-                faces = []
-                if y == 1:
-                    faces.append("U")
-                elif y == -1:
-                    faces.append("D")
-
-                if x == 1:
-                    faces.append("R")
-                elif x == -1:
-                    faces.append("L")
-
-                if z == 1:
-                    faces.append("F")
-                elif z == -1:
-                    faces.append("B")
-
-                pieces.append({
-                    "home_position": position,
-                    "faces": tuple(faces),
-                    "piece_type": "corner" if magnitude == 3 else "edge",
-                })
-
-    pieces.sort(
-        key=lambda piece: (
-            piece["piece_type"],
-            piece["home_position"][1],
-            piece["home_position"][0],
-            piece["home_position"][2],
-        )
-    )
-    return tuple(pieces)
-
-# Rotate a logical position or sticker direction by a 90-degree turn.
-def rotate_logical_vector(vector, axis, angle):
-    turns = (int(round(angle / 90.0)) % 4 + 4) % 4
-    rotated = tuple(vector)
-
-    for _unused in range(turns):
-        x, y, z = rotated
-        if axis == "x":
-            rotated = (x, -z, y)
-        elif axis == "y":
-            rotated = (z, y, -x)
-        else:
-            rotated = (-y, x, z)
-
-    return rotated
+    return build_shared_solver_piece_metadata()
 
 # Build the immutable logical solved piece states used to seed the catalogs.
 def build_solved_piece_states():
-    return tuple(
-        (piece["home_position"],) + tuple(FACE_VECTORS[face] for face in piece["faces"])
-        for piece in SOLVER_PIECES
-    )
+    return build_shared_solved_piece_states(SOLVER_PIECES)
 
 # Enumerate every reachable state code for each individual piece.
 def build_piece_state_catalogs():
-    state_infos = []
-    state_to_code = []
-    position_ids = []
-    orientation_ids = []
-
-    for solved_piece_state in SOLVED_PIECE_STATES:
-        queue = [solved_piece_state]
-        queue_index = 0
-        piece_states = [solved_piece_state]
-        piece_state_to_code = {solved_piece_state: 0}
-
-        while queue_index < len(queue):
-            current_state = queue[queue_index]
-            queue_index += 1
-            for move_name in SEARCH_MOVE_NAMES:
-                next_state = apply_move_to_piece_state(current_state, move_name)
-                if next_state in piece_state_to_code:
-                    continue
-
-                piece_state_to_code[next_state] = len(piece_states)
-                piece_states.append(next_state)
-                queue.append(next_state)
-
-        position_lookup = {}
-        orientation_lookup = {}
-        piece_position_ids = []
-        piece_orientation_ids = []
-        for piece_state in piece_states:
-            position = piece_state[0]
-            orientation = piece_state[1:]
-
-            if position not in position_lookup:
-                position_lookup[position] = len(position_lookup)
-            if orientation not in orientation_lookup:
-                orientation_lookup[orientation] = len(orientation_lookup)
-
-            piece_position_ids.append(position_lookup[position])
-            piece_orientation_ids.append(orientation_lookup[orientation])
-
-        state_infos.append(tuple(piece_states))
-        state_to_code.append(piece_state_to_code)
-        position_ids.append(tuple(piece_position_ids))
-        orientation_ids.append(tuple(piece_orientation_ids))
-
-    return (
-        tuple(state_infos),
-        tuple(state_to_code),
-        tuple(position_ids),
-        tuple(orientation_ids),
-    )
+    return build_shared_piece_state_catalogs(SOLVED_PIECE_STATES)
 
 # Precompute how every solver move transforms every encoded piece state.
 def build_move_state_tables():
-    move_tables = {}
-
-    for move_name in SEARCH_MOVE_NAMES:
-        per_piece_tables = []
-
-        for piece_index, piece_states in enumerate(PIECE_STATE_INFOS):
-            piece_lookup = PIECE_STATE_TO_CODE[piece_index]
-            per_piece_tables.append(
-                tuple(
-                    piece_lookup[apply_move_to_piece_state(piece_state, move_name)]
-                    for piece_state in piece_states
-                )
-            )
-
-        move_tables[move_name] = tuple(per_piece_tables)
-
-    return move_tables
+    return build_shared_move_state_tables(PIECE_STATE_INFOS, PIECE_STATE_TO_CODE)
 
 # Build the immutable encoded solved state used as the search target.
 def build_solved_cube_state():
-    return tuple(
-        PIECE_STATE_TO_CODE[piece_index][SOLVED_PIECE_STATES[piece_index]]
-        for piece_index in range(len(SOLVED_PIECE_STATES))
-    )
+    return build_shared_solved_cube_state(PIECE_STATE_TO_CODE, SOLVED_PIECE_STATES)
 
 # Return which axis a logical direction vector lies on.
 def get_vector_axis_index(vector):
@@ -2159,9 +2934,7 @@ def get_search_context_face(last_move):
 
 # Apply a move sequence to a logical cube state and return the resulting state.
 def apply_move_sequence_to_cube_state(state, move_names):
-    for move_name in move_names:
-        state = apply_move_to_cube_state(state, move_name)
-    return state
+    return apply_move_sequence_with_tables(state, MOVE_STATE_TABLES, move_names)
 
 # Run one bounded phase-2 depth-first pass after orientation and slice placement are solved.
 def search_phase2_with_ida_star(
@@ -2704,11 +3477,7 @@ def save_solver_goal_from_current_state():
 
 # Apply one search move to the abstract cube-state model.
 def apply_move_to_cube_state(state, move_name):
-    move_table = MOVE_STATE_TABLES[move_name]
-    return tuple(
-        move_table[piece_index][piece_state_code]
-        for piece_index, piece_state_code in enumerate(state)
-    )
+    return apply_move_to_cube_state_with_tables(state, MOVE_STATE_TABLES, move_name)
 
 # Return whether a logical state already matches the saved goal state.
 def is_cube_state_solved(state=None):
@@ -2946,23 +3715,58 @@ def find_basic_a_star_solution(start_state, goal_state=None, max_depth=None, max
 
 # Generate a random scramble while avoiding immediate same-face repeats.
 def generate_scramble(length=SCRAMBLE_LENGTH):
-    move_names = list(MOVES.keys())
-    scramble = []
-    previous_face = None
+    return generate_scramble_text(length, move_names=MOVES.keys(), rng=random)
 
-    for _unused in range(length):
-        # Avoid immediately repeating the same face twice in a row so scrambles
-        # feel more natural and don't waste moves like R R'.
-        valid_moves = [move_name for move_name in move_names if move_name[0] != previous_face]
-        move_name = random.choice(valid_moves)
-        scramble.append(move_name)
-        previous_face = move_name[0]
 
-    return " ".join(scramble)
+# Temporarily suspend Cached Playback so animated scrambles do not fill Maya's
+# evaluation cache with every intermediate turn.
+def suspend_cached_playback_for_scramble():
+    global SCRAMBLE_CACHE_WAS_ENABLED
+
+    if SCRAMBLE_CACHE_WAS_ENABLED is not None:
+        return
+
+    try:
+        cache_enabled = cmds.evaluator(name="cache", query=True, enable=True)
+    except Exception:
+        SCRAMBLE_CACHE_WAS_ENABLED = None
+        return
+
+    SCRAMBLE_CACHE_WAS_ENABLED = bool(cache_enabled)
+    if not SCRAMBLE_CACHE_WAS_ENABLED:
+        return
+
+    try:
+        cmds.evaluator(name="cache", enable=False)
+        cmds.cacheEvaluator(flushCache="destroy")
+    except Exception:
+        pass
+
+
+# Restore Cached Playback to the user's previous state after scrambling.
+def restore_cached_playback_after_scramble():
+    global SCRAMBLE_CACHE_WAS_ENABLED
+
+    if SCRAMBLE_CACHE_WAS_ENABLED is None:
+        return
+
+    was_enabled = SCRAMBLE_CACHE_WAS_ENABLED
+    SCRAMBLE_CACHE_WAS_ENABLED = None
+
+    if not was_enabled:
+        return
+
+    try:
+        cmds.evaluator(name="cache", enable=True)
+    except Exception:
+        pass
 
 
 # Apply a single move from a UI button or viewport control.
 def move(move_name):
+    if is_busy_with_sequence():
+        cmds.warning("Stop the active sequence before making manual moves")
+        return
     apply_move(move_name)
 
 
@@ -2991,6 +3795,9 @@ def clear_animation_and_reset(*_unused):
     global CURRENT_ORIENTATION
     global CUBE_STATE
     global MOVE_HISTORY
+    global MOVE_HISTORY_BASE_FRAME
+    global MOVE_HISTORY_INDEX
+    global VISIBLE_HISTORY_LENGTH
 
     controls_enabled = cmds.objExists("rubik_controls_grp")
 
@@ -3015,6 +3822,10 @@ def clear_animation_and_reset(*_unused):
         reset_orientation()
 
     MOVE_HISTORY.clear()
+    MOVE_HISTORY_FRAMES.clear()
+    MOVE_HISTORY_BASE_FRAME = 1
+    MOVE_HISTORY_INDEX = 0
+    VISIBLE_HISTORY_LENGTH = 0
     ensure_solver_state()
     CUBE_STATE = SOLVED_CUBE_STATE
 
@@ -3024,18 +3835,377 @@ def clear_animation_and_reset(*_unused):
         reset_viewport_control_directions()
 
     update_ui_move_buttons()
+    update_playback_ui()
 
-    current_time = 1
+    sync_timeline_to_history_index(0)
 
 # Reverse a move sequence by reversing order and inverting each move.
 def reverse_sequence(sequence):
-    reverse = []
-    for move in reversed(sequence.split()):
-        reverse.append(INVERSE_MOVES.get(move, move))
-    return " ".join(reverse)
+    try:
+        move_names = parse_move_sequence(sequence)
+    except ValueError:
+        move_names = normalize_algorithm_text(sequence).split()
+    reverse = [INVERSE_MOVES.get(move_name, move_name) for move_name in reversed(move_names)]
+    return format_move_sequence(reverse)
+
+
+def get_algorithm_field_text():
+    if not cmds.control(ALGORITHM_FIELD, exists=True):
+        return ""
+    return cmds.scrollField(ALGORITHM_FIELD, q=True, text=True)
+
+
+def set_algorithm_field_text(sequence):
+    if not cmds.control(ALGORITHM_FIELD, exists=True):
+        return
+
+    cmds.scrollField(
+        ALGORITHM_FIELD,
+        e=True,
+        text=normalize_algorithm_text(sequence),
+    )
+
+
+def begin_algorithm_run(move_names):
+    global ALGORITHM_RUN_ACTIVE
+    global ALGORITHM_RUN_PENDING_MOVES
+    global ALGORITHM_RUN_STOP_REQUESTED
+
+    normalized_sequence = format_move_sequence(move_names)
+    set_algorithm_field_text(normalized_sequence)
+    ALGORITHM_RUN_ACTIVE = True
+    ALGORITHM_RUN_STOP_REQUESTED = False
+    ALGORITHM_RUN_PENDING_MOVES = list(move_names)
+    update_run_algorithm_button_label()
+    update_playback_ui()
+    schedule_next_algorithm_move()
+
+
+def load_move_history_into_algorithm_field(*_unused):
+    set_algorithm_field_text(format_move_sequence(MOVE_HISTORY[:MOVE_HISTORY_INDEX]))
+
+
+def load_inverse_history_into_algorithm_field(*_unused):
+    set_algorithm_field_text(reverse_sequence(format_move_sequence(MOVE_HISTORY[:MOVE_HISTORY_INDEX])))
+
+
+def run_algorithm_from_field(*_unused):
+    if PLAYBACK_ACTIVE:
+        cmds.warning("Pause playback before running an algorithm")
+        return
+
+    if SCRAMBLE_ACTIVE:
+        cmds.warning("Stop the scramble before running an algorithm")
+        return
+
+    if ALGORITHM_RUN_ACTIVE:
+        # Match scramble behavior: do not interrupt the active turn, just stop
+        # before scheduling the next one.
+        ALGORITHM_RUN_STOP_REQUESTED = True
+        update_run_algorithm_button_label()
+        return
+
+    sequence = get_algorithm_field_text()
+    if not sequence.strip():
+        cmds.warning("Enter an algorithm to run")
+        return
+
+    try:
+        move_names = parse_move_sequence(sequence, valid_moves=MOVES)
+    except ValueError as error:
+        cmds.warning(str(error))
+        return
+
+    begin_algorithm_run(move_names)
+
+
+def schedule_next_algorithm_move():
+    if QtCore is not None:
+        QtCore.QTimer.singleShot(0, process_next_algorithm_move)
+        return
+
+    maya_utils.executeDeferred(process_next_algorithm_move)
+
+
+def finish_algorithm_run():
+    global ALGORITHM_RUN_ACTIVE
+    global ALGORITHM_RUN_PENDING_MOVES
+    global ALGORITHM_RUN_STOP_REQUESTED
+
+    ALGORITHM_RUN_ACTIVE = False
+    ALGORITHM_RUN_STOP_REQUESTED = False
+    ALGORITHM_RUN_PENDING_MOVES = []
+    update_run_algorithm_button_label()
+    update_playback_ui()
+
+
+def process_next_algorithm_move():
+    global ALGORITHM_RUN_PENDING_MOVES
+
+    if not ALGORITHM_RUN_ACTIVE:
+        return
+
+    if ALGORITHM_RUN_STOP_REQUESTED or not ALGORITHM_RUN_PENDING_MOVES:
+        finish_algorithm_run()
+        return
+
+    # Execute exactly one move, then yield back to Maya so the same button can
+    # request a clean stop between turns instead of interrupting mid-turn.
+    move_name = ALGORITHM_RUN_PENDING_MOVES.pop(0)
+    apply_move(move_name)
+
+    if ALGORITHM_RUN_STOP_REQUESTED or not ALGORITHM_RUN_PENDING_MOVES:
+        finish_algorithm_run()
+        return
+
+    schedule_next_algorithm_move()
+
+
+def update_playback_ui():
+    global PLAYBACK_SCRUB_UPDATING
+
+    update_ui_move_buttons()
+
+    if cmds.control(PLAYBACK_PLAY_BUTTON, exists=True):
+        play_label = "Pause Playback" if PLAYBACK_ACTIVE else "Play Forward"
+        cmds.button(PLAYBACK_PLAY_BUTTON, e=True, label=play_label)
+
+    can_back = can_step_backward() and not is_busy_with_sequence()
+    can_forward = can_step_forward() and not is_busy_with_sequence()
+    can_toggle_playback = (can_step_forward() or PLAYBACK_ACTIVE) and not SCRAMBLE_ACTIVE and not ALGORITHM_RUN_ACTIVE
+
+    for control_name in (PLAYBACK_STEP_BACK_BUTTON, PLAYBACK_UNDO_BUTTON):
+        if cmds.control(control_name, exists=True):
+            cmds.button(control_name, e=True, enable=can_back)
+
+    for control_name in (PLAYBACK_STEP_FORWARD_BUTTON, PLAYBACK_REDO_BUTTON):
+        if cmds.control(control_name, exists=True):
+            cmds.button(control_name, e=True, enable=can_forward)
+
+    if cmds.control(PLAYBACK_PLAY_BUTTON, exists=True):
+        cmds.button(PLAYBACK_PLAY_BUTTON, e=True, enable=can_toggle_playback)
+
+    if cmds.control(PLAYBACK_SCRUB_SLIDER, exists=True):
+        PLAYBACK_SCRUB_UPDATING = True
+        try:
+            cmds.intSliderGrp(
+                PLAYBACK_SCRUB_SLIDER,
+                e=True,
+                min=0,
+                max=max(1, VISIBLE_HISTORY_LENGTH),
+                fieldMinValue=0,
+                fieldMaxValue=max(1, VISIBLE_HISTORY_LENGTH),
+                value=MOVE_HISTORY_INDEX,
+                enable=not is_busy_with_sequence(),
+            )
+        finally:
+            PLAYBACK_SCRUB_UPDATING = False
+
+    if cmds.control(PLAYBACK_STATUS_TEXT, exists=True):
+        if VISIBLE_HISTORY_LENGTH:
+            status = "History Position: {0}/{1}".format(MOVE_HISTORY_INDEX, VISIBLE_HISTORY_LENGTH)
+        else:
+            status = "History Position: 0/0"
+        cmds.text(PLAYBACK_STATUS_TEXT, e=True, label=status)
+
+
+def finish_playback():
+    global PLAYBACK_ACTIVE
+    global PLAYBACK_STOP_REQUESTED
+
+    PLAYBACK_ACTIVE = False
+    PLAYBACK_STOP_REQUESTED = False
+    update_playback_ui()
+
+
+def schedule_next_playback_step():
+    if QtCore is not None:
+        QtCore.QTimer.singleShot(0, process_next_playback_step)
+        return
+
+    maya_utils.executeDeferred(process_next_playback_step)
+
+
+def step_history_forward(animate=None, start_frame=None):
+    global MOVE_HISTORY_INDEX
+
+    if not can_step_forward():
+        return False
+
+    if animate is False and can_use_keyed_history_scrub():
+        target_index = MOVE_HISTORY_INDEX + 1
+        sync_logical_state_to_history_index(target_index)
+        sync_timeline_to_history_index(target_index)
+        update_playback_ui()
+        return True
+
+    if animate is False:
+        return rebuild_scene_to_history_index(MOVE_HISTORY_INDEX + 1)
+
+    move_name = MOVE_HISTORY[MOVE_HISTORY_INDEX]
+    if not apply_move(move_name, animate=animate, start_frame=start_frame, track_history=False):
+        return False
+
+    MOVE_HISTORY_INDEX += 1
+    if animate:
+        MOVE_HISTORY_FRAMES[MOVE_HISTORY_INDEX - 1] = current_time
+    else:
+        sync_timeline_to_history_index()
+    update_playback_ui()
+    return True
+
+
+def step_history_backward(animate=None, start_frame=None):
+    global MOVE_HISTORY_INDEX
+
+    if not can_step_backward():
+        return False
+
+    if animate is False and can_use_keyed_history_scrub():
+        target_index = MOVE_HISTORY_INDEX - 1
+        sync_logical_state_to_history_index(target_index)
+        sync_timeline_to_history_index(target_index)
+        update_playback_ui()
+        return True
+
+    if animate is False:
+        return rebuild_scene_to_history_index(MOVE_HISTORY_INDEX - 1)
+
+    if MOVE_HISTORY_INDEX == 1:
+        move_name = MOVE_HISTORY[0]
+        inverse_move = INVERSE_MOVES.get(move_name, move_name)
+        if animate:
+            if not apply_move(
+                inverse_move,
+                animate=True,
+                start_frame=start_frame,
+                track_history=False,
+            ):
+                return False
+
+        if not restore_cube_to_history_base_state():
+            return False
+
+        MOVE_HISTORY_INDEX = 0
+        sync_timeline_to_history_index()
+        update_playback_ui()
+        return True
+
+    move_name = MOVE_HISTORY[MOVE_HISTORY_INDEX - 1]
+    inverse_move = INVERSE_MOVES.get(move_name, move_name)
+    if not apply_move(inverse_move, animate=animate, start_frame=start_frame, track_history=False):
+        return False
+
+    MOVE_HISTORY_INDEX -= 1
+    if animate and MOVE_HISTORY_INDEX > 0:
+        MOVE_HISTORY_FRAMES[MOVE_HISTORY_INDEX - 1] = current_time
+    else:
+        sync_timeline_to_history_index()
+    update_playback_ui()
+    return True
+
+
+def process_next_playback_step():
+    global current_time
+
+    if not PLAYBACK_ACTIVE:
+        return
+
+    if PLAYBACK_STOP_REQUESTED or not can_step_forward():
+        finish_playback()
+        return
+
+    start_frame = max(get_current_frame(), current_time) if get_animation_enabled() else None
+    if not step_history_forward(animate=get_animation_enabled(), start_frame=start_frame):
+        finish_playback()
+        return
+
+    if PLAYBACK_STOP_REQUESTED or not can_step_forward():
+        finish_playback()
+        return
+
+    schedule_next_playback_step()
+
+
+def toggle_playback(*_unused):
+    global PLAYBACK_ACTIVE
+    global PLAYBACK_STOP_REQUESTED
+
+    if SCRAMBLE_ACTIVE:
+        cmds.warning("Stop the scramble before using playback")
+        return
+
+    if ALGORITHM_RUN_ACTIVE:
+        cmds.warning("Stop the algorithm before using playback")
+        return
+
+    if PLAYBACK_ACTIVE:
+        PLAYBACK_STOP_REQUESTED = True
+        update_playback_ui()
+        return
+
+    if not can_step_forward():
+        cmds.warning("Move the playback position backward before playing forward")
+        return
+
+    PLAYBACK_ACTIVE = True
+    PLAYBACK_STOP_REQUESTED = False
+    update_playback_ui()
+    schedule_next_playback_step()
+
+
+def undo_move(*_unused):
+    global VISIBLE_HISTORY_LENGTH
+
+    if is_busy_with_sequence():
+        cmds.warning("Stop the active sequence before undoing moves")
+        return
+
+    if not step_history_backward(animate=get_animation_enabled()):
+        cmds.warning("No moves available to undo")
+        return
+
+    VISIBLE_HISTORY_LENGTH = MOVE_HISTORY_INDEX
+    update_playback_ui()
+
+
+def redo_move(*_unused):
+    global VISIBLE_HISTORY_LENGTH
+
+    if is_busy_with_sequence():
+        cmds.warning("Stop the active sequence before redoing moves")
+        return
+
+    if not step_history_forward(animate=get_animation_enabled()):
+        cmds.warning("No moves available to redo")
+        return
+
+    VISIBLE_HISTORY_LENGTH = max(VISIBLE_HISTORY_LENGTH, MOVE_HISTORY_INDEX)
+    update_playback_ui()
+
+
+def scrub_to_history_position(value):
+    if PLAYBACK_SCRUB_UPDATING:
+        return
+
+    if is_busy_with_sequence():
+        return
+
+    target_index = max(0, min(int(value), VISIBLE_HISTORY_LENGTH))
+    while MOVE_HISTORY_INDEX < target_index:
+        if not step_history_forward(animate=False):
+            break
+
+    while MOVE_HISTORY_INDEX > target_index:
+        if not step_history_backward(animate=False):
+            break
     
 # Solve the current logical cube state with the strongest available solver path.
 def solve_from_history(*_unused):
+    global MOVE_HISTORY_BASE_FRAME
+    global MOVE_HISTORY_INDEX
+    global VISIBLE_HISTORY_LENGTH
+
     if not get_all_cubies():
         cmds.warning("Build the cube before solving")
         return
@@ -3109,8 +4279,11 @@ def solve_from_history(*_unused):
                     )
                 )
                 if solution:
-                    run_sequence(solution, track_history=False)
-                MOVE_HISTORY.clear()
+                    # Preserve the existing move history so playback can scrub
+                    # across the full session, including the solve itself, and
+                    # run it through the deferred scheduler so playback UI can
+                    # update live during the solve.
+                    begin_algorithm_run(execution_moves)
                 return
 
             if search_stats["limit_type"] == "time":
@@ -3168,8 +4341,9 @@ def solve_from_history(*_unused):
             )
         )
         if solution:
-            run_sequence(solution, track_history=False)
-        MOVE_HISTORY.clear()
+            # Keep the pre-solve move record available in playback and append
+            # the solver moves after it while letting the scrubber update live.
+            begin_algorithm_run(execution_moves)
         return
 
     if search_stats["limit_type"] == "time":
@@ -3207,6 +4381,14 @@ def scramble_cube(*_unused):
     global SCRAMBLE_PENDING_MOVES
     global SCRAMBLE_STOP_REQUESTED
 
+    if PLAYBACK_ACTIVE:
+        cmds.warning("Pause playback before starting a scramble")
+        return
+
+    if ALGORITHM_RUN_ACTIVE:
+        cmds.warning("Stop the current algorithm before starting a scramble")
+        return
+
     if SCRAMBLE_ACTIVE:
         # Clicking the button again does not interrupt the current turn. It only
         # requests that the scheduler stop before starting the next move.
@@ -3217,7 +4399,11 @@ def scramble_cube(*_unused):
     SCRAMBLE_ACTIVE = True
     SCRAMBLE_STOP_REQUESTED = False
     SCRAMBLE_PENDING_MOVES = generate_scramble().split()
+    if get_animation_enabled():
+        suspend_cached_playback_for_scramble()
+    set_algorithm_field_text(format_move_sequence(SCRAMBLE_PENDING_MOVES))
     update_scramble_button_label()
+    update_playback_ui()
     schedule_next_scramble_move()
 
 # Queue the next scramble step so Maya can stay responsive.
@@ -3238,7 +4424,9 @@ def finish_scramble():
     SCRAMBLE_ACTIVE = False
     SCRAMBLE_STOP_REQUESTED = False
     SCRAMBLE_PENDING_MOVES = []
+    restore_cached_playback_after_scramble()
     update_scramble_button_label()
+    update_playback_ui()
 
 # Execute one pending scramble move, then reschedule if needed.
 def process_next_scramble_move():
@@ -3271,17 +4459,24 @@ def run_sequence(sequence, track_history=None):
 
     ensure_initial_state()
     animate = get_animation_enabled()
+    try:
+        move_names = parse_move_sequence(sequence, valid_moves=MOVES)
+    except ValueError as error:
+        cmds.warning(str(error))
+        return
+
+    if not move_names:
+        return
+
+    normalized_sequence = format_move_sequence(move_names)
+    set_algorithm_field_text(normalized_sequence)
 
     if animate:
         # Animated sequences queue moves one after another on the timeline.
         sequence_frame = get_current_frame()
-        for move_name in sequence.split():
+        for move_name in move_names:
             if SCRAMBLE_ACTIVE and SCRAMBLE_STOP_REQUESTED:
                 break
-
-            if move_name not in MOVES:
-                print("Invalid move: {0}".format(move_name))
-                continue
 
             apply_move(
                 move_name,
@@ -3289,11 +4484,11 @@ def run_sequence(sequence, track_history=None):
                 start_frame=sequence_frame,
                 track_history=track_history,
             )
-            sequence_frame += MOVE_DURATION + 2
+            sequence_frame += get_move_duration() + 2
         current_time = sequence_frame
         return
 
-    for move_name in sequence.split():
+    for move_name in move_names:
         if SCRAMBLE_ACTIVE and SCRAMBLE_STOP_REQUESTED:
             break
         apply_move(move_name, animate=False, track_history=track_history)
@@ -3305,52 +4500,72 @@ def run_sequence(sequence, track_history=None):
 def create_ui():
     global UI_MOVE_BUTTONS
     ensure_initial_state()
-    # Treat re-running the script as a fresh tool launch and jump the Maya
-    # timeline back to the default starting frame.
     cmds.currentTime(1)
 
     cmds.window("rubikUI", exists=True) and cmds.deleteUI("rubikUI")
-    
+
     window = cmds.window("rubikUI", title="Rubik's Cube Controller")
-    
-    main_layout = cmds.columnLayout(adjustableColumn=True)
-    
+    cmds.columnLayout(adjustableColumn=True)
+
     cmds.button(
+        BUILD_CUBE_BUTTON,
         label="Build/Rebuild Cube",
-        command=lambda *_: create_rubiks_cube()
+        command=lambda *_: create_rubiks_cube(),
+        annotation="Create the cube if it is missing, or rebuild it from scratch.",
     )
-    
-    cmds.separator(h=8)
-    
-    # Create tabs below button
+
+    cmds.separator(h=10)
     tabs = cmds.tabLayout(innerMarginWidth=10, innerMarginHeight=10)
-    
-    # -------------------------
-    # Tab 1: Solving
-    # -------------------------
+
     solve_tab = cmds.columnLayout(adjustableColumn=True)
-    
+
+    cmds.columnLayout(SOLVE_SETTINGS_SECTION, adjustableColumn=True)
     cmds.checkBox(
         ANIMATE_CHECKBOX,
         label="Animate / Add Keyframes",
         value=True,
+        annotation="When enabled, moves create timeline keyframes instead of snapping instantly.",
     )
-    
-    cmds.separator(h=8)
-    
+    cmds.intSliderGrp(
+        MOVE_SPEED_SLIDER,
+        label="Move Duration",
+        field=True,
+        min=2,
+        max=30,
+        fieldMinValue=1,
+        fieldMaxValue=60,
+        value=MOVE_DURATION,
+        step=1,
+        changeCommand=lambda *_: update_playback_ui(),
+        dragCommand=lambda *_: update_playback_ui(),
+        annotation="Adjust how many frames each animated move takes.",
+        **get_slider_group_layout_kwargs()
+    )
+    cmds.setParent(solve_tab)
+
+    cmds.separator(h=10)
+
+    cmds.columnLayout(MOVE_BUTTONS_SECTION, adjustableColumn=True)
     cmds.text(label="Cube Operations")
     moves_pane = cmds.paneLayout(configuration="vertical2", separatorThickness=6)
     cmds.columnLayout(adjustableColumn=True, parent=moves_pane)
     UI_MOVE_BUTTONS = {}
     for world_face in ("U", "D", "R", "L", "F", "B"):
-        UI_MOVE_BUTTONS[(world_face, 1)] = cmds.button(label=world_face)
+        UI_MOVE_BUTTONS[(world_face, 1)] = cmds.button(
+            label=world_face,
+            annotation=get_move_button_tooltip(world_face, 1),
+        )
     cmds.columnLayout(adjustableColumn=True, parent=moves_pane)
     for world_face in ("U", "D", "R", "L", "F", "B"):
-        UI_MOVE_BUTTONS[(world_face, -1)] = cmds.button(label=world_face + "'")
+        UI_MOVE_BUTTONS[(world_face, -1)] = cmds.button(
+            label=world_face + "'",
+            annotation=get_move_button_tooltip(world_face, -1),
+        )
     cmds.setParent(solve_tab)
-    
+
     cmds.separator(h=10)
-    
+
+    cmds.columnLayout(ORIENTATION_SECTION, adjustableColumn=True)
     cmds.text(label="Cube Orientation")
     orientation_pane = cmds.paneLayout(configuration="vertical2", separatorThickness=6)
     cmds.columnLayout(adjustableColumn=True, parent=orientation_pane)
@@ -3358,61 +4573,305 @@ def create_ui():
         cmds.button(
             label=rotation_name,
             command=lambda _unused, rotation_name=rotation_name: rotate_cube(rotation_name),
+            annotation=ROTATION_BUTTON_TOOLTIPS[rotation_name],
         )
     cmds.columnLayout(adjustableColumn=True, parent=orientation_pane)
     for rotation_name in ("X", "Y", "Z"):
         cmds.button(
             label=rotation_name + "'",
             command=lambda _unused, rotation_name=rotation_name + "'": rotate_cube(rotation_name),
+            annotation=ROTATION_BUTTON_TOOLTIPS[rotation_name + "'"],
         )
     cmds.setParent(solve_tab)
-    
+
     cmds.separator(h=10)
-    
+
+    cmds.columnLayout(ACTION_SECTION, adjustableColumn=True)
     cmds.button(
-        "controlsButton",
+        CONTROLS_BUTTON,
         label="Create Viewport Controls",
-        command=toggle_viewport_controls
+        command=toggle_viewport_controls,
+        annotation="Create or delete clickable viewport arrows around the cube.",
     )
-    
     cmds.button(
         SCRAMBLE_BUTTON,
         label="Scramble",
         command=scramble_cube,
+        annotation="Generate and run a random scramble sequence.",
     )
-    
     cmds.button(
         "solveButton",
         label="Solve Cube",
         command=solve_from_history,
+        annotation="Run the solver from the current logical cube state.",
     )
-    
+    cmds.setParent(solve_tab)
+
+    cmds.separator(h=10)
+
+    cmds.columnLayout(ALGORITHM_SECTION, adjustableColumn=True)
+    cmds.text(label="Algorithm Input / Export")
+    cmds.scrollField(
+        ALGORITHM_FIELD,
+        wordWrap=False,
+        text="",
+        height=70,
+        annotation="Paste or edit a move sequence here, such as R U R' U'.",
+    )
+    cmds.button(
+        RUN_ALGORITHM_BUTTON,
+        label="Run Algorithm",
+        command=run_algorithm_from_field,
+        annotation="Run the move sequence currently written in the algorithm field.",
+    )
+    cmds.setParent(solve_tab)
+
+    cmds.separator(h=10)
+
+    cmds.columnLayout(PLAYBACK_SECTION, adjustableColumn=True)
+    cmds.text(label="Playback / History")
+    playback_pane = cmds.paneLayout(configuration="vertical2", separatorThickness=6)
+    cmds.columnLayout(adjustableColumn=True, parent=playback_pane)
+    cmds.button(
+        PLAYBACK_PLAY_BUTTON,
+        label="Play Forward",
+        command=toggle_playback,
+        annotation="Play forward from the current history position.",
+    )
+    cmds.button(
+        PLAYBACK_STEP_FORWARD_BUTTON,
+        label="Step Forward",
+        command=redo_move,
+        annotation="Advance one move forward through the recorded history.",
+    )
+    cmds.button(
+        PLAYBACK_REDO_BUTTON,
+        label="Redo",
+        command=redo_move,
+        annotation="Redo the next move in history.",
+    )
+    cmds.columnLayout(adjustableColumn=True, parent=playback_pane)
+    cmds.button(
+        PLAYBACK_STEP_BACK_BUTTON,
+        label="Step Back",
+        command=undo_move,
+        annotation="Step backward one move through the recorded history.",
+    )
+    cmds.button(
+        PLAYBACK_UNDO_BUTTON,
+        label="Undo",
+        command=undo_move,
+        annotation="Undo the most recently applied move.",
+    )
+    cmds.button(
+        label="Load Current History",
+        command=load_move_history_into_algorithm_field,
+        annotation="Copy the currently applied move history into the algorithm field.",
+    )
+    cmds.setParent(solve_tab)
+
+    cmds.intSliderGrp(
+        PLAYBACK_SCRUB_SLIDER,
+        label="History Scrub",
+        field=True,
+        min=0,
+        max=1,
+        fieldMinValue=0,
+        fieldMaxValue=1,
+        value=0,
+        step=1,
+        dragCommand=scrub_to_history_position,
+        changeCommand=scrub_to_history_position,
+        annotation="Drag to jump to any point in the recorded move history.",
+        **get_slider_group_layout_kwargs()
+    )
+    cmds.text(
+        PLAYBACK_STATUS_TEXT,
+        label="History Position: 0/0",
+        align="left",
+        annotation="Shows the current playback cursor and total recorded moves.",
+    )
+    cmds.button(
+        label="Load Move History",
+        command=load_move_history_into_algorithm_field,
+        annotation="Load the applied history into the algorithm field.",
+    )
+    cmds.button(
+        label="Load Inverse History",
+        command=load_inverse_history_into_algorithm_field,
+        annotation="Load the inverse of the applied history into the algorithm field.",
+    )
+    cmds.setParent(solve_tab)
+
+    cmds.separator(h=10)
+
+    cmds.columnLayout(RESET_SECTION, adjustableColumn=True)
     cmds.button(
         label="Clear Keyframes + Reset Cube",
         command=clear_animation_and_reset,
+        annotation="Remove cube animation keys and restore the saved reset pose.",
     )
-    
     cmds.button(
         label="Save Current Pose As Reset State",
         command=save_current_pose_as_initial_state,
+        annotation="Use the current pose as the new reset state and solve target.",
+    )
+    cmds.setParent(tabs)
+
+    aesthetic_tab = cmds.columnLayout(adjustableColumn=True)
+
+    cmds.columnLayout(AESTHETICS_POLISH_SECTION, adjustableColumn=True)
+    
+    cmds.button(
+        label="Reset Aesthetics",
+        command=reset_aesthetics_to_defaults,
+        annotation="Restore all appearance settings to their defaults while keeping the current theme preset.",
     )
     
-    cmds.setParent('..')
+    cmds.separator(h=10)
     
-    # -------------------------
-    # Tab 2: Aesthetics
-    # -------------------------
-    aesthetic_tab = cmds.columnLayout(adjustableColumn=True)
+    cmds.text(label="Cube Polish")
     
+    cmds.floatSliderGrp(
+        "gapSpacingSlider",
+        label="Gap Spacing",
+        field=True,
+        min=0.0,
+        max=0.22,
+        value=GAP_SPACING,
+        step=0.01,
+        precision=3,
+        dragCommand=lambda *_: on_gap_spacing_changed(True),
+        changeCommand=lambda *_: on_gap_spacing_changed(False),
+        annotation="Increase the spacing between cubies without changing slice logic.",
+        **get_slider_group_layout_kwargs()
+    )
+    cmds.floatSliderGrp(
+        "stickerScaleSlider",
+        label="Sticker Size",
+        field=True,
+        min=0.55,
+        max=0.96,
+        value=STICKER_SCALE,
+        step=0.01,
+        precision=3,
+        dragCommand=lambda *_: on_sticker_scale_changed(True),
+        changeCommand=lambda *_: on_sticker_scale_changed(False),
+        annotation="Shrink or expand the sticker footprint on each visible face.",
+        **get_slider_group_layout_kwargs()
+    )
+    cmds.floatSliderGrp(
+        "stickerThicknessSlider",
+        label="Sticker Depth",
+        field=True,
+        min=0.005,
+        max=0.05,
+        value=STICKER_THICKNESS,
+        step=0.005,
+        precision=3,
+        dragCommand=lambda *_: on_sticker_thickness_changed(True),
+        changeCommand=lambda *_: on_sticker_thickness_changed(False),
+        annotation="Adjust how thick the sticker geometry sits above each cubie.",
+        **get_slider_group_layout_kwargs()
+    )
+    cmds.floatSliderGrp(
+        "stickerRoundnessSlider",
+        label="Sticker Round",
+        field=True,
+        min=0.0,
+        max=0.5,
+        value=STICKER_ROUNDNESS,
+        step=0.002,
+        precision=3,
+        dragCommand=lambda *_: on_sticker_roundness_changed(True),
+        changeCommand=lambda *_: on_sticker_roundness_changed(False),
+        annotation="Round off the sticker edges for a softer finished look.",
+        **get_slider_group_layout_kwargs()
+    )
+    cmds.separator(h=10)
+    cmds.setParent(aesthetic_tab)
+
+    cmds.columnLayout(AESTHETICS_CONTROLS_SECTION, adjustableColumn=True)
+    cmds.text(label="Viewport Controls")
+    cmds.floatSliderGrp(
+        "controlSizeSlider",
+        label="Control Size",
+        field=True,
+        min=0.7,
+        max=1.7,
+        value=CONTROL_SIZE,
+        step=0.05,
+        precision=2,
+        dragCommand=lambda *_: on_control_size_changed(True),
+        changeCommand=lambda *_: on_control_size_changed(False),
+        annotation="Resize the viewport arrows and push them outward a bit as they grow.",
+        **get_slider_group_layout_kwargs()
+    )
+    cmds.floatSliderGrp(
+        "controlOpacitySlider",
+        label="Control Alpha",
+        field=True,
+        min=0.1,
+        max=1.0,
+        value=CONTROL_OPACITY,
+        step=0.05,
+        precision=2,
+        dragCommand=lambda *_: on_control_opacity_changed(True),
+        changeCommand=lambda *_: on_control_opacity_changed(False),
+        annotation="Adjust the fill opacity of the viewport controls.",
+        **get_slider_group_layout_kwargs()
+    )
+    cmds.separator(h=10)
+    cmds.setParent(aesthetic_tab)
+
+    cmds.columnLayout(AESTHETICS_ENVIRONMENT_SECTION, adjustableColumn=True)
+    cmds.text(label="Environment")
+    cmds.checkBox(
+        "viewportBackgroundToggle",
+        label="Theme Background",
+        value=SHOW_VIEWPORT_BACKGROUND,
+        changeCommand=on_viewport_background_toggled,
+        annotation="Toggle a themed Maya viewport gradient background.",
+    )
+    cmds.checkBox(
+        "floorGridToggle",
+        label="Show Floor Grid",
+        value=SHOW_FLOOR_GRID,
+        changeCommand=on_floor_grid_toggled,
+        annotation="Show or hide the Maya floor grid for cleaner presentation shots.",
+    )
+    cmds.checkBox(
+        "presentationModeToggle",
+        label="Presentation Mode",
+        value=PRESENTATION_MODE,
+        changeCommand=on_presentation_mode_toggled,
+        annotation="Hide construction and history sections so the tool reads more like a player.",
+    )
+    cmds.separator(h=10)
+    cmds.setParent(aesthetic_tab)
+
+    cmds.columnLayout(AESTHETICS_THEME_SECTION, adjustableColumn=True)
+    cmds.text(label="Theme Preset")
+    cmds.optionMenu(
+        "themeDropdown",
+        label="Preset",
+        changeCommand=on_theme_changed,
+        annotation="Swap face colors and optional background styling together.",
+    )
+    for theme_name in THEME_PRESETS:
+        cmds.menuItem(label=theme_name)
+    cmds.separator(h=10)
+    cmds.setParent(aesthetic_tab)
+
+    cmds.columnLayout(AESTHETICS_BEVEL_SECTION, adjustableColumn=True)
     cmds.text(label="Bevel Settings")
-    
     cmds.checkBox(
         "bevelToggle",
         label="Enable Bevel",
         value=BEVEL_ENABLED,
-        changeCommand=lambda val: (set_bevel_enabled(val), create_rubiks_cube())
+        changeCommand=lambda val: (set_bevel_enabled(val), create_rubiks_cube(preserve_scene_state=True)),
+        annotation="Toggle beveled cube edges for a softer look.",
     )
-    
     cmds.floatSliderGrp(
         "bevelFraction",
         label="Bevel Amount",
@@ -3422,59 +4881,42 @@ def create_ui():
         value=BEVEL_FRACTION,
         step=0.01,
         precision=3,
-    
         dragCommand=lambda *_: on_bevel_fraction_changed(),
-        changeCommand=lambda *_: on_bevel_fraction_changed()
+        changeCommand=lambda *_: on_bevel_fraction_changed(),
+        annotation="Control how wide the bevel is on each cubie edge.",
+        **get_slider_group_layout_kwargs()
     )
-    
     cmds.intSliderGrp(
         "bevelSegments",
         label="Bevel Segments",
         field=True,
         min=1,
-        max=5,
+        max=20,
         value=BEVEL_SEGMENTS,
-    
         dragCommand=lambda *_: on_bevel_segments_changed(),
-        changeCommand=lambda *_: on_bevel_segments_changed()
+        changeCommand=lambda *_: on_bevel_segments_changed(),
+        annotation="Set how many edge segments are used in the bevel.",
+        **get_slider_group_layout_kwargs()
     )
-    
     cmds.optionMenu(
         "miteringDropdown",
         label="Mitering",
-        changeCommand=lambda val: (set_bevel_mitering(int(val)), create_rubiks_cube())
+        changeCommand=lambda val: (set_bevel_mitering(int(val)), create_rubiks_cube(preserve_scene_state=True)),
+        annotation="Choose how beveled corners are connected.",
     )
-    
     cmds.menuItem(label="0")
     cmds.menuItem(label="1")
-    cmds.menuItem(label="2") 
-    
+    cmds.menuItem(label="2")
     cmds.checkBox(
         "chamferToggle",
         label="Chamfer",
         value=BEVEL_CHAMFER,
-        changeCommand=lambda val: (set_bevel_chamfer(val), create_rubiks_cube())
-    )       
-    
-    cmds.separator(h=10)
-    
-    cmds.text(label="Shader Type")
-    
-    cmds.optionMenu(
-        "shaderDropdown",
-        changeCommand=lambda val: (set_shader_type(val), create_rubiks_cube())
+        changeCommand=lambda val: (set_bevel_chamfer(val), create_rubiks_cube(preserve_scene_state=True)),
+        annotation="Switch between chamfered and non-chamfered bevel behavior.",
     )
-    
-    cmds.menuItem(label="aiStandardSurface")
-    cmds.menuItem(label="lambert")
-    
     cmds.separator(h=10)
-    
     cmds.setParent('..')
-    
-    # -------------------------
-    # Tab Labels
-    # -------------------------
+
     cmds.tabLayout(
         tabs,
         edit=True,
@@ -3483,12 +4925,19 @@ def create_ui():
             (aesthetic_tab, "Aesthetics")
         ]
     )
-    
+
     update_controls_button_label()
-    
+
     cmds.showWindow(window)
-    update_ui_move_buttons()
+    cmds.optionMenu("themeDropdown", e=True, value=THEME_NAME)
+    cmds.optionMenu("miteringDropdown", e=True, value=str(BEVEL_MITERING))
     update_scramble_button_label()
+    update_run_algorithm_button_label()
+    update_ui_move_buttons()
+    update_playback_ui()
+    apply_viewport_background()
+    apply_floor_grid_visibility()
+    update_presentation_mode_ui()
 
 # Update the scramble button text to match the current scramble state.
 def update_scramble_button_label():
@@ -3501,10 +4950,23 @@ def update_scramble_button_label():
 
     cmds.button(SCRAMBLE_BUTTON, e=True, label=label)
 
+
+def update_run_algorithm_button_label():
+    if not cmds.control(RUN_ALGORITHM_BUTTON, exists=True):
+        return
+
+    label = "Run Algorithm"
+    if ALGORITHM_RUN_ACTIVE:
+        label = "Stopping..." if ALGORITHM_RUN_STOP_REQUESTED else "Stop Algorithm"
+
+    cmds.button(RUN_ALGORITHM_BUTTON, e=True, label=label)
+
 # Refresh the labels and callbacks of the move buttons for current orientation.
 def update_ui_move_buttons():
     if not UI_MOVE_BUTTONS:
         return
+
+    moves_enabled = not is_busy_with_sequence()
 
     for world_face in ("U", "D", "R", "L", "F", "B"):
         positive_move_name = get_mapped_move_for_world_button(world_face, 1)
@@ -3516,7 +4978,9 @@ def update_ui_move_buttons():
             cmds.button(
                 positive_button,
                 e=True,
+                enable=moves_enabled,
                 label=world_face,
+                annotation=get_move_button_tooltip(world_face, 1),
                 command=lambda _unused, move_name=positive_move_name: move(move_name),
             )
 
@@ -3524,7 +4988,9 @@ def update_ui_move_buttons():
             cmds.button(
                 negative_button,
                 e=True,
+                enable=moves_enabled,
                 label=world_face + "'",
+                annotation=get_move_button_tooltip(world_face, -1),
                 command=lambda _unused, move_name=negative_move_name: move(move_name),
             )
     
@@ -3535,8 +5001,8 @@ def update_ui_move_buttons():
 def create_face_control(name, position, normal, color):
     # Each viewport control is a flat arrow built from curve/mesh geometry and
     # then oriented onto one face of the cube.
-    outer_radius = 1.30
-    body_thickness = 0.42
+    outer_radius = 1.30 * CONTROL_SIZE
+    body_thickness = 0.42 * CONTROL_SIZE
     inner_radius = outer_radius - body_thickness
     start_angle = 225.0
     end_angle = -25.0
@@ -3603,7 +5069,7 @@ def create_face_control(name, position, normal, color):
         tail_tangent[2] / tail_tangent_length,
     )
     tail_normal = (-tail_tangent[2], 0, tail_tangent[0])
-    tail_offset = 0.16
+    tail_offset = 0.16 * CONTROL_SIZE
     tail_half_width = body_thickness * 0.5
     tail_cap = [
         (
@@ -3618,8 +5084,8 @@ def create_face_control(name, position, normal, color):
         ),
     ]
 
-    head_length = 0.52
-    head_width = 0.34
+    head_length = 0.52 * CONTROL_SIZE
+    head_width = 0.34 * CONTROL_SIZE
     arrow_tip = (
         mid_end[0] + tangent[0] * head_length,
         0,
@@ -3754,7 +5220,7 @@ def create_face_control(name, position, normal, color):
             cmds.setAttr(shape + ".overrideEnabled", 1)
             cmds.setAttr(shape + ".overrideRGBColors", 1)
             cmds.setAttr(shape + ".overrideColorRGB", *color)
-            cmds.setAttr(shape + ".lineWidth", 2)
+            cmds.setAttr(shape + ".lineWidth", max(1.0, 2.0 * CONTROL_SIZE))
 
     cmds.addAttr(ctrl, longName="direction", attributeType="long", defaultValue=1)
     cmds.setAttr(ctrl + ".direction", e=True, keyable=False)
@@ -3767,13 +5233,14 @@ def create_face_control(name, position, normal, color):
 # Create all six viewport controls around the cube.
 def create_viewport_controls():
     ctrls = []
+    control_distance = 2.0 + ((CONTROL_SIZE - 1.0) * 0.45)
     control_specs = [
-        ("ctrl_U", (0, 2, 0), (0, 1, 0)),
-        ("ctrl_D", (0, -2, 0), (0, 1, 0)),
-        ("ctrl_R", (2, 0, 0), (1, 0, 0)),
-        ("ctrl_L", (-2, 0, 0), (1, 0, 0)),
-        ("ctrl_F", (0, 0, 2), (0, 0, 1)),
-        ("ctrl_B", (0, 0, -2), (0, 0, 1)),
+        ("ctrl_U", (0, control_distance, 0), (0, 1, 0)),
+        ("ctrl_D", (0, -control_distance, 0), (0, 1, 0)),
+        ("ctrl_R", (control_distance, 0, 0), (1, 0, 0)),
+        ("ctrl_L", (-control_distance, 0, 0), (1, 0, 0)),
+        ("ctrl_F", (0, 0, control_distance), (0, 0, 1)),
+        ("ctrl_B", (0, 0, -control_distance), (0, 0, 1)),
     ]
 
     for ctrl_name, position, normal in control_specs:
@@ -3941,16 +5408,25 @@ def restore_selection_without_undo(selection):
 
 # React to selection changes and trigger viewport controls when clicked.
 def on_selection_changed(*_unused):
+    global CONTROL_CLICK_ARMED
     global CONTROL_PROCESSING_SELECTION
     global CONTROL_SKIP_SELECTION_CHANGE
 
     if CONTROL_PROCESSING_SELECTION or CONTROL_SKIP_SELECTION_CHANGE:
         return
 
-    selection = cmds.ls(selection=True) or []
-    if not selection:
+    # Only treat a selection change as a button press when it was armed by an
+    # actual left-click in the viewport. This prevents context-menu actions
+    # such as Hypershade/shader edits from accidentally triggering a move.
+    if not CONTROL_CLICK_ARMED:
         return
 
+    selection = cmds.ls(selection=True) or []
+    if not selection:
+        CONTROL_CLICK_ARMED = False
+        return
+
+    CONTROL_CLICK_ARMED = False
     CONTROL_PROCESSING_SELECTION = True
     try:
         trigger_selected_control()
@@ -4080,9 +5556,16 @@ class ShiftPreviewEventFilter(QtCore.QObject if QtCore else object):
         elif event_type == QtCore.QEvent.KeyRelease and event.key() == QtCore.Qt.Key_Shift:
             set_shift_preview_direction(1)
         elif event_type == QtCore.QEvent.MouseButtonPress:
-            CONTROL_CLICK_ARMED = True
-            CONTROL_SKIP_SELECTION_CHANGE = False
-            CONTROL_SELECTION_BEFORE_CLICK = cmds.ls(selection=True) or []
+            if event.button() == QtCore.Qt.LeftButton:
+                CONTROL_CLICK_ARMED = True
+                CONTROL_SKIP_SELECTION_CHANGE = False
+                CONTROL_SELECTION_BEFORE_CLICK = cmds.ls(selection=True) or []
+            else:
+                CONTROL_CLICK_ARMED = False
+                CONTROL_SELECTION_BEFORE_CLICK = []
+        elif event_type == QtCore.QEvent.ContextMenu:
+            CONTROL_CLICK_ARMED = False
+            CONTROL_SELECTION_BEFORE_CLICK = []
         elif event_type in (
             QtCore.QEvent.FocusOut,
             QtCore.QEvent.WindowDeactivate,
@@ -4234,13 +5717,23 @@ def toggle_viewport_controls(*_unused):
     
 # Refresh the viewport-controls button label to match current state.
 def update_controls_button_label():
-    if not cmds.control("controlsButton", exists=True):
+    if not cmds.control(CONTROLS_BUTTON, exists=True):
         return
 
     if cmds.objExists("rubik_controls_grp"):
-        cmds.button("controlsButton", e=True, label="Delete Viewport Controls")
+        cmds.button(
+            CONTROLS_BUTTON,
+            e=True,
+            label="Delete Viewport Controls",
+            annotation="Delete the clickable viewport arrows around the cube.",
+        )
     else:
-        cmds.button("controlsButton", e=True, label="Create Viewport Controls")
+        cmds.button(
+            CONTROLS_BUTTON,
+            e=True,
+            label="Create Viewport Controls",
+            annotation="Create clickable viewport arrows around the cube.",
+        )
 
 # -------------------------
 # Script Startup
@@ -4251,4 +5744,5 @@ if get_all_cubies():
         cmds.delete(get_all_cubies())
 delete_existing_controls()
 clear_stale_selection_script_jobs()
+apply_theme(THEME_NAME)
 create_ui()

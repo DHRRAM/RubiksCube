@@ -1,6 +1,6 @@
 """Standalone pure-Python solver core for the Maya Rubik's Cube tool.
 
-This module mirrors the logical state encoding used in `RubiksCube.py` so the
+This module mirrors the logical state encoding used in `rubiks_cube.py` so the
 Maya tool can hand its current cube state directly to the solver.
 """
 
@@ -10,6 +10,28 @@ import pickle
 import time
 from array import array
 from itertools import combinations
+
+from rubiks_move_notation import (
+    MOVES,
+    PHASE1_MOVE_NAMES,
+    PHASE2_MOVE_NAMES,
+    SEARCH_MOVE_NAMES,
+    expand_solver_moves,
+    get_inverse_move,
+    get_move_face,
+    should_prune_search_move,
+)
+from rubiks_state_utils import (
+    apply_move_sequence_to_cube_state as apply_move_sequence_with_tables,
+    apply_move_to_cube_state as apply_move_to_cube_state_with_tables,
+    apply_move_to_piece_state,
+    build_move_state_tables as build_shared_move_state_tables,
+    build_piece_state_catalogs as build_shared_piece_state_catalogs,
+    build_solved_cube_state as build_shared_solved_cube_state,
+    build_solved_piece_states as build_shared_solved_piece_states,
+    build_solver_piece_metadata as build_shared_solver_piece_metadata,
+    rotate_logical_vector,
+)
 
 
 SOLVER_MAX_DEPTH = 14
@@ -55,100 +77,6 @@ PHASE1_REVERSE_FRONTIER_KEYS = array("I")
 PHASE1_REVERSE_FRONTIER_DEPTHS = bytearray()
 PHASE1_REVERSE_FRONTIER_MASK = 0
 PHASE1_REVERSE_FRONTIER_ENTRY_COUNT = 0
-
-MOVES = {
-    "U": ("y", 1, -90),
-    "U'": ("y", 1, 90),
-    "D": ("y", -1, 90),
-    "D'": ("y", -1, -90),
-    "R": ("x", 1, -90),
-    "R'": ("x", 1, 90),
-    "L": ("x", -1, 90),
-    "L'": ("x", -1, -90),
-    "F": ("z", 1, -90),
-    "F'": ("z", 1, 90),
-    "B": ("z", -1, 90),
-    "B'": ("z", -1, -90),
-}
-
-FACE_VECTORS = {
-    "U": (0, 1, 0),
-    "D": (0, -1, 0),
-    "R": (1, 0, 0),
-    "L": (-1, 0, 0),
-    "F": (0, 0, 1),
-    "B": (0, 0, -1),
-}
-FACE_AXES = {
-    "U": "y",
-    "D": "y",
-    "R": "x",
-    "L": "x",
-    "F": "z",
-    "B": "z",
-}
-OPPOSITE_FACE_ORDER = {
-    "U": 0,
-    "D": 1,
-    "R": 0,
-    "L": 1,
-    "F": 0,
-    "B": 1,
-}
-SEARCH_MOVES = {
-    "U": MOVES["U"],
-    "U2": ("y", 1, 180),
-    "U'": MOVES["U'"],
-    "D": MOVES["D"],
-    "D2": ("y", -1, 180),
-    "D'": MOVES["D'"],
-    "R": MOVES["R"],
-    "R2": ("x", 1, 180),
-    "R'": MOVES["R'"],
-    "L": MOVES["L"],
-    "L2": ("x", -1, 180),
-    "L'": MOVES["L'"],
-    "F": MOVES["F"],
-    "F2": ("z", 1, 180),
-    "F'": MOVES["F'"],
-    "B": MOVES["B"],
-    "B2": ("z", -1, 180),
-    "B'": MOVES["B'"],
-}
-SEARCH_MOVE_NAMES = tuple(SEARCH_MOVES.keys())
-MOVE_EXPANSIONS = {
-    "U": ("U",),
-    "U2": ("U", "U"),
-    "U'": ("U'",),
-    "D": ("D",),
-    "D2": ("D", "D"),
-    "D'": ("D'",),
-    "R": ("R",),
-    "R2": ("R", "R"),
-    "R'": ("R'",),
-    "L": ("L",),
-    "L2": ("L", "L"),
-    "L'": ("L'",),
-    "F": ("F",),
-    "F2": ("F", "F"),
-    "F'": ("F'",),
-    "B": ("B",),
-    "B2": ("B", "B"),
-    "B'": ("B'",),
-}
-PHASE1_MOVE_NAMES = SEARCH_MOVE_NAMES
-PHASE2_MOVE_NAMES = (
-    "U",
-    "U2",
-    "U'",
-    "D",
-    "D2",
-    "D'",
-    "R2",
-    "L2",
-    "F2",
-    "B2",
-)
 PHASE1_MOVE_COUNT = len(PHASE1_MOVE_NAMES)
 PHASE2_MOVE_COUNT = len(PHASE2_MOVE_NAMES)
 CORNER_ORIENTATION_COUNT = 3 ** 7
@@ -350,204 +278,30 @@ def save_two_phase_solver_cache():
         log("Skipping two-phase solver cache save ({0})".format(error))
 
 
-def get_move_face(move_name):
-    return move_name[0]
-
-
-def get_inverse_move(move_name):
-    if move_name.endswith("2"):
-        return move_name
-    if move_name.endswith("'"):
-        return move_name.replace("'", "")
-    return move_name + "'"
-
-
 INVERSE_MOVES = {
     move_name: get_inverse_move(move_name)
     for move_name in SEARCH_MOVE_NAMES
 }
 
 
-def expand_solver_moves(move_names):
-    expanded = []
-    for move_name in move_names:
-        expanded.extend(MOVE_EXPANSIONS.get(move_name, (move_name,)))
-    return expanded
-
-
-def should_prune_search_move(last_move, move_name):
-    if not last_move:
-        return False
-
-    last_face = get_move_face(last_move)
-    face = get_move_face(move_name)
-    if face == last_face:
-        return True
-    if FACE_AXES[face] == FACE_AXES[last_face]:
-        return OPPOSITE_FACE_ORDER[face] < OPPOSITE_FACE_ORDER[last_face]
-    return False
-
-
-def rotate_logical_vector(vector, axis, angle):
-    turns = (int(round(angle / 90.0)) % 4 + 4) % 4
-    rotated = tuple(vector)
-
-    for _unused in range(turns):
-        x, y, z = rotated
-        if axis == "x":
-            rotated = (x, -z, y)
-        elif axis == "y":
-            rotated = (z, y, -x)
-        else:
-            rotated = (-y, x, z)
-
-    return rotated
-
-
-def apply_move_to_piece_state(piece_state, move_name):
-    axis, value, angle = SEARCH_MOVES[move_name]
-    axis_index = {"x": 0, "y": 1, "z": 2}[axis]
-    position = piece_state[0]
-    sticker_directions = piece_state[1:]
-
-    if position[axis_index] != value:
-        return piece_state
-
-    rotated_position = rotate_logical_vector(position, axis, angle)
-    rotated_directions = tuple(
-        rotate_logical_vector(direction, axis, angle)
-        for direction in sticker_directions
-    )
-    return (rotated_position,) + rotated_directions
-
-
 def build_solver_piece_metadata():
-    pieces = []
-
-    for x in (-1, 0, 1):
-        for y in (-1, 0, 1):
-            for z in (-1, 0, 1):
-                position = (x, y, z)
-                magnitude = abs(x) + abs(y) + abs(z)
-                if magnitude not in (2, 3):
-                    continue
-
-                faces = []
-                if y == 1:
-                    faces.append("U")
-                elif y == -1:
-                    faces.append("D")
-                if x == 1:
-                    faces.append("R")
-                elif x == -1:
-                    faces.append("L")
-                if z == 1:
-                    faces.append("F")
-                elif z == -1:
-                    faces.append("B")
-
-                pieces.append(
-                    {
-                        "home_position": position,
-                        "faces": tuple(faces),
-                        "piece_type": "corner" if magnitude == 3 else "edge",
-                    }
-                )
-
-    pieces.sort(
-        key=lambda piece: (
-            piece["piece_type"],
-            piece["home_position"][1],
-            piece["home_position"][0],
-            piece["home_position"][2],
-        )
-    )
-    return tuple(pieces)
+    return build_shared_solver_piece_metadata()
 
 
 def build_solved_piece_states():
-    return tuple(
-        (piece["home_position"],) + tuple(FACE_VECTORS[face] for face in piece["faces"])
-        for piece in SOLVER_PIECES
-    )
+    return build_shared_solved_piece_states(SOLVER_PIECES)
 
 
 def build_piece_state_catalogs():
-    state_infos = []
-    state_to_code = []
-    position_ids = []
-    orientation_ids = []
-
-    for solved_piece_state in SOLVED_PIECE_STATES:
-        queue = [solved_piece_state]
-        queue_index = 0
-        piece_states = [solved_piece_state]
-        piece_state_to_code = {solved_piece_state: 0}
-
-        while queue_index < len(queue):
-            current_state = queue[queue_index]
-            queue_index += 1
-            for move_name in SEARCH_MOVE_NAMES:
-                next_state = apply_move_to_piece_state(current_state, move_name)
-                if next_state in piece_state_to_code:
-                    continue
-
-                piece_state_to_code[next_state] = len(piece_states)
-                piece_states.append(next_state)
-                queue.append(next_state)
-
-        position_lookup = {}
-        orientation_lookup = {}
-        piece_position_ids = []
-        piece_orientation_ids = []
-        for piece_state in piece_states:
-            position = piece_state[0]
-            orientation = piece_state[1:]
-            if position not in position_lookup:
-                position_lookup[position] = len(position_lookup)
-            if orientation not in orientation_lookup:
-                orientation_lookup[orientation] = len(orientation_lookup)
-
-            piece_position_ids.append(position_lookup[position])
-            piece_orientation_ids.append(orientation_lookup[orientation])
-
-        state_infos.append(tuple(piece_states))
-        state_to_code.append(piece_state_to_code)
-        position_ids.append(tuple(piece_position_ids))
-        orientation_ids.append(tuple(piece_orientation_ids))
-
-    return (
-        tuple(state_infos),
-        tuple(state_to_code),
-        tuple(position_ids),
-        tuple(orientation_ids),
-    )
+    return build_shared_piece_state_catalogs(SOLVED_PIECE_STATES)
 
 
 def build_move_state_tables():
-    move_tables = {}
-
-    for move_name in SEARCH_MOVE_NAMES:
-        per_piece_tables = []
-        for piece_index, piece_states in enumerate(PIECE_STATE_INFOS):
-            piece_lookup = PIECE_STATE_TO_CODE[piece_index]
-            per_piece_tables.append(
-                tuple(
-                    piece_lookup[apply_move_to_piece_state(piece_state, move_name)]
-                    for piece_state in piece_states
-                )
-            )
-
-        move_tables[move_name] = tuple(per_piece_tables)
-
-    return move_tables
+    return build_shared_move_state_tables(PIECE_STATE_INFOS, PIECE_STATE_TO_CODE)
 
 
 def build_solved_cube_state():
-    return tuple(
-        PIECE_STATE_TO_CODE[piece_index][SOLVED_PIECE_STATES[piece_index]]
-        for piece_index in range(len(SOLVED_PIECE_STATES))
-    )
+    return build_shared_solved_cube_state(PIECE_STATE_TO_CODE, SOLVED_PIECE_STATES)
 
 
 def get_vector_axis_index(vector):
@@ -1337,9 +1091,7 @@ def get_search_context_face(last_move):
 
 
 def apply_move_sequence_to_cube_state(state, move_names):
-    for move_name in move_names:
-        state = apply_move_to_cube_state(state, move_name)
-    return state
+    return apply_move_sequence_with_tables(state, MOVE_STATE_TABLES, move_names)
 
 
 def search_phase2_with_ida_star(
@@ -2193,11 +1945,7 @@ def get_canonical_solved_state():
 
 def apply_move_to_cube_state(state, move_name):
     ensure_solver_state()
-    move_table = MOVE_STATE_TABLES[move_name]
-    return tuple(
-        move_table[piece_index][piece_state_code]
-        for piece_index, piece_state_code in enumerate(state)
-    )
+    return apply_move_to_cube_state_with_tables(state, MOVE_STATE_TABLES, move_name)
 
 
 def estimate_remaining_moves(state, goal_state=None):

@@ -9,6 +9,96 @@ from itertools import combinations
 
 import maya.cmds as cmds
 import maya.utils as maya_utils
+
+
+EARLY_TOOL_DIRECTORY_OPTIONVAR = "RubiksCubeToolDirectory"
+EARLY_REQUIRED_MODULES = (
+    "rubiks_move_notation.py",
+    "rubiks_state_utils.py",
+    "rubiks_tool_paths.py",
+)
+
+
+def _bootstrap_project_directory():
+    candidate_directories = []
+    seen_directories = set()
+
+    def add_candidate(path):
+        if not path:
+            return
+
+        normalized_path = os.path.abspath(path)
+        if os.path.isfile(normalized_path):
+            normalized_path = os.path.dirname(normalized_path)
+        if not os.path.isdir(normalized_path):
+            return
+
+        directory_key = os.path.normcase(normalized_path)
+        if directory_key in seen_directories:
+            return
+
+        seen_directories.add(directory_key)
+        candidate_directories.append(normalized_path)
+
+    add_candidate(globals().get("__file__"))
+    code_object = globals().get("_bootstrap_project_directory").__code__
+    add_candidate(code_object.co_filename)
+    add_candidate(os.environ.get("RUBIKS_CUBE_TOOL_DIR"))
+    add_candidate(os.getcwd())
+    try:
+        if cmds.optionVar(exists=EARLY_TOOL_DIRECTORY_OPTIONVAR):
+            add_candidate(cmds.optionVar(q=EARLY_TOOL_DIRECTORY_OPTIONVAR))
+    except Exception:
+        pass
+    try:
+        add_candidate(cmds.internalVar(userScriptDir=True))
+    except Exception:
+        pass
+    for directory in os.environ.get("MAYA_SCRIPT_PATH", "").split(os.pathsep):
+        add_candidate(directory)
+
+    for directory in list(sys.path):
+        add_candidate(directory)
+
+    for directory in candidate_directories:
+        if all(os.path.exists(os.path.join(directory, module_name)) for module_name in EARLY_REQUIRED_MODULES):
+            if directory not in sys.path:
+                sys.path.insert(0, directory)
+            os.environ["RUBIKS_CUBE_TOOL_DIR"] = directory
+            try:
+                cmds.optionVar(sv=(EARLY_TOOL_DIRECTORY_OPTIONVAR, directory))
+            except Exception:
+                pass
+            return directory
+
+    try:
+        selection = cmds.fileDialog2(
+            caption="Select rubiks_cube.py",
+            fileFilter="Python Files (*.py)",
+            fileMode=1,
+            okCaption="Use Selected File",
+        )
+    except Exception:
+        selection = None
+
+    if selection:
+        selected_directory = os.path.dirname(os.path.abspath(selection[0]))
+        if all(
+            os.path.exists(os.path.join(selected_directory, module_name))
+            for module_name in EARLY_REQUIRED_MODULES
+        ):
+            if selected_directory not in sys.path:
+                sys.path.insert(0, selected_directory)
+            os.environ["RUBIKS_CUBE_TOOL_DIR"] = selected_directory
+            try:
+                cmds.optionVar(sv=(EARLY_TOOL_DIRECTORY_OPTIONVAR, selected_directory))
+            except Exception:
+                pass
+            return selected_directory
+    return None
+
+
+SCRIPT_DIRECTORY = _bootstrap_project_directory()
 from rubiks_move_notation import (
     CUBE_ROTATIONS,
     FACE_VECTORS,
@@ -58,12 +148,6 @@ try:
     import maya.OpenMayaUI as omui
 except ImportError:
     omui = None
-
-SCRIPT_DIRECTORY = None
-if "__file__" in globals():
-    SCRIPT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
-    if SCRIPT_DIRECTORY and SCRIPT_DIRECTORY not in sys.path:
-        sys.path.insert(0, SCRIPT_DIRECTORY)
 
 standalone_solver_core = None
 STANDALONE_SOLVER_IMPORT_ERROR = None
@@ -373,6 +457,7 @@ PRESENTATION_MANAGED_CONTROLS = (
     RESET_SECTION,
 )
 DEFAULT_VIEWPORT_BACKGROUND = {}
+MAYA_DEFAULT_VIEWPORT_BACKGROUND = (0.36, 0.36, 0.36)
 VISUAL_REFRESH_TOKEN = 0
 
 MOVE_BUTTON_TOOLTIPS = {
@@ -638,14 +723,13 @@ def schedule_visual_refresh(rebuild_cube=False, rebuild_controls=False, refresh_
 def capture_default_viewport_background():
     if DEFAULT_VIEWPORT_BACKGROUND:
         return
-
-    for color_name in ("background", "backgroundTop", "backgroundBottom"):
-        try:
-            DEFAULT_VIEWPORT_BACKGROUND[color_name] = tuple(
-                cmds.displayRGBColor(color_name, q=True)
-            )
-        except Exception:
-            return
+    DEFAULT_VIEWPORT_BACKGROUND.update(
+        {
+            "background": MAYA_DEFAULT_VIEWPORT_BACKGROUND,
+            "backgroundTop": MAYA_DEFAULT_VIEWPORT_BACKGROUND,
+            "backgroundBottom": MAYA_DEFAULT_VIEWPORT_BACKGROUND,
+        }
+    )
 
 
 def apply_viewport_background():
@@ -656,11 +740,19 @@ def apply_viewport_background():
 
     if SHOW_VIEWPORT_BACKGROUND:
         background_top, background_mid, background_bottom = THEME_PRESETS[THEME_NAME]["background"]
+        try:
+            cmds.displayPref(displayGradient=True)
+        except Exception:
+            pass
         cmds.displayRGBColor("backgroundTop", *background_top)
         cmds.displayRGBColor("background", *background_mid)
         cmds.displayRGBColor("backgroundBottom", *background_bottom)
         return
 
+    try:
+        cmds.displayPref(displayGradient=False)
+    except Exception:
+        pass
     for color_name, color_value in DEFAULT_VIEWPORT_BACKGROUND.items():
         cmds.displayRGBColor(color_name, *color_value)
 
@@ -5823,4 +5915,5 @@ delete_existing_controls()
 delete_existing_tool_materials()
 clear_stale_selection_script_jobs()
 apply_theme(THEME_NAME)
+apply_viewport_background()
 create_ui()

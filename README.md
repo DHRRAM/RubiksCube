@@ -4,6 +4,8 @@ A Rubik's Cube project built around a Maya tool and a standalone solver core.
 
 Demo videos:
 
+https://github.com/user-attachments/assets/c8c3955e-5a1c-49d4-bdb2-b081fa0918de
+
 https://github.com/user-attachments/assets/44f9d621-6763-45c1-85bd-dd7835a545d9
 
 https://github.com/user-attachments/assets/f16d2e3c-8ed4-401d-8bfa-3083823d29d8

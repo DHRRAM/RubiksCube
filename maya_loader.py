@@ -14,6 +14,55 @@ import os
 import sys
 
 import maya.cmds as cmds
+
+
+def _bootstrap_loader_directory():
+    candidates = []
+    seen_directories = set()
+
+    def add_candidate(path):
+        if not path:
+            return
+
+        normalized_path = os.path.abspath(path)
+        if os.path.isfile(normalized_path):
+            normalized_path = os.path.dirname(normalized_path)
+        if not os.path.isdir(normalized_path):
+            return
+
+        directory_key = os.path.normcase(normalized_path)
+        if directory_key in seen_directories:
+            return
+
+        seen_directories.add(directory_key)
+        candidates.append(normalized_path)
+
+    add_candidate(globals().get("__file__"))
+    code_object = globals().get("_bootstrap_loader_directory").__code__
+    add_candidate(code_object.co_filename)
+    add_candidate(os.environ.get("RUBIKS_CUBE_TOOL_DIR"))
+    add_candidate(os.getcwd())
+    try:
+        add_candidate(cmds.internalVar(userScriptDir=True))
+    except Exception:
+        pass
+
+    for directory in os.environ.get("MAYA_SCRIPT_PATH", "").split(os.pathsep):
+        add_candidate(directory)
+    for directory in list(sys.path):
+        add_candidate(directory)
+
+    for directory in candidates:
+        helper_module = os.path.join(directory, "rubiks_tool_paths.py")
+        if os.path.exists(helper_module):
+            if directory not in sys.path:
+                sys.path.insert(0, directory)
+            return directory
+    return None
+
+
+_bootstrap_loader_directory()
+
 from rubiks_tool_paths import (
     RUBIKS_MODULE_NAMES,
     TOOL_DIRECTORY_OPTIONVAR,
@@ -102,6 +151,9 @@ def load(project_root=None, prompt_if_missing=True):
         project_root=project_root,
         prompt_if_missing=prompt_if_missing,
     )
+    expected_module_path = os.path.normcase(
+        os.path.abspath(os.path.join(resolved_project_root, MODULE_NAME + ".py"))
+    )
 
     # Keep both the current Python session and future Maya sessions pointed at
     # the same tool directory so sibling modules import consistently.
@@ -112,6 +164,24 @@ def load(project_root=None, prompt_if_missing=True):
         cmds.optionVar(sv=(TOOL_DIRECTORY_OPTIONVAR, resolved_project_root))
     except Exception:
         pass
+
+    modules_to_reset = (
+        "rubiks_cube",
+        "rubiks_move_notation",
+        "rubiks_state_utils",
+        "rubiks_tool_paths",
+        "rubiks_solver_core",
+    )
+    existing_module = sys.modules.get(MODULE_NAME)
+    existing_module_path = os.path.normcase(
+        os.path.abspath(getattr(existing_module, "__file__", ""))
+    ) if existing_module is not None else None
+
+    # If Maya is still holding a module imported from the old folder, reload is
+    # not enough because it would keep following the stale file path.
+    if existing_module_path != expected_module_path:
+        for module_name in modules_to_reset:
+            sys.modules.pop(module_name, None)
 
     for legacy_module_name in RUBIKS_MODULE_NAMES:
         if legacy_module_name != MODULE_NAME and legacy_module_name in sys.modules:

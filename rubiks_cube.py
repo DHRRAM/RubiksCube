@@ -4,6 +4,7 @@ import os
 import random
 import sys
 import time
+import threading
 from array import array
 from itertools import combinations
 
@@ -411,6 +412,8 @@ CONTROL_SCRIPT_JOBS = []
 CONTROL_SHIFT_DIRECTION = None
 CONTROL_SHIFT_EVENT_FILTER = None
 CONTROL_SHIFT_TIMER = None
+CONTROL_SHIFT_POLL_THREAD = None
+CONTROL_SHIFT_POLL_STOP_EVENT = None
 CONTROL_CLICK_ARMED = False
 CONTROL_SELECTION_BEFORE_CLICK = []
 CONTROL_CLICK_UNDO_DISABLED = False
@@ -5529,9 +5532,11 @@ def update_shift_preview_state():
     CONTROL_SHIFT_DIRECTION = target_direction
 
 # Force the viewport control preview arrows to a specific direction.
-def set_shift_preview_direction(direction):
+def set_shift_preview_direction(direction, *args, **kwargs):
     global CONTROL_SHIFT_DIRECTION
 
+    # Accept extra args/kwargs because Maya's deferred/scriptJob/Qt
+    # callbacks may provide additional parameters (e.g. 'source').
     if not cmds.objExists("rubik_controls_grp"):
         CONTROL_SHIFT_DIRECTION = None
         return
@@ -5588,6 +5593,26 @@ def on_selection_changed(*_unused):
     # actual left-click in the viewport. This prevents context-menu actions
     # such as Hypershade/shader edits from accidentally triggering a move.
     if not CONTROL_CLICK_ARMED:
+        # If Qt event-filtering isn't available (PySide/shiboken/omui missing),
+        # fall back to treating a direct selection of a viewport control
+        # (names starting with "ctrl_") as a click. This keeps the buttons
+        # functional in environments where the Qt hook can't be installed.
+        if QtWidgets is None or CONTROL_SHIFT_EVENT_FILTER is None:
+            selection = cmds.ls(selection=True) or []
+            if not selection:
+                CONTROL_CLICK_ARMED = False
+                return
+
+            obj = selection[0].split(".", 1)[0]
+            short_name = obj.split("|")[-1]
+            if short_name.startswith("ctrl_"):
+                CONTROL_PROCESSING_SELECTION = True
+                try:
+                    trigger_selected_control()
+                finally:
+                    CONTROL_PROCESSING_SELECTION = False
+                return
+
         return
 
     selection = cmds.ls(selection=True) or []
@@ -5783,25 +5808,122 @@ def remove_shift_preview_event_filter():
 def install_shift_preview_timer():
     global CONTROL_SHIFT_TIMER
 
-    if QtCore is None or QtWidgets is None:
+    # Prefer a Qt timer when PySide2 is available for smooth polling.
+    if QtCore is not None and QtWidgets is not None:
+        if CONTROL_SHIFT_TIMER is not None:
+            return
+
+        CONTROL_SHIFT_TIMER = QtCore.QTimer()
+        CONTROL_SHIFT_TIMER.setInterval(5)
+        CONTROL_SHIFT_TIMER.timeout.connect(sync_shift_preview_from_qt)
+        CONTROL_SHIFT_TIMER.start()
+        return
+    # If Qt isn't available, try a background thread (Windows) that polls
+    # the OS shift key state using GetAsyncKeyState. Polling runs in a daemon
+    # thread and updates the UI via maya.utils.executeDeferred to ensure
+    # main-thread safety. This avoids relying on intermittent idle events.
+    global CONTROL_SHIFT_POLL_THREAD, CONTROL_SHIFT_POLL_STOP_EVENT
+    if CONTROL_SHIFT_POLL_THREAD is not None:
         return
 
+    try:
+        import ctypes
+
+        VK_SHIFT = 0x10
+        stop_event = threading.Event()
+
+        def _poll_shift():
+            last_state = None
+            user32 = ctypes.windll.user32
+            while not stop_event.is_set():
+                try:
+                    state = bool(user32.GetAsyncKeyState(VK_SHIFT) & 0x8000)
+                except Exception:
+                    state = False
+
+                if state != last_state:
+                    last_state = state
+                    try:
+                        # Use executeDeferred to call back on the main thread.
+                        # Accept arbitrary args/kwargs because Maya may pass
+                        # extra keyword arguments (e.g., 'source') to deferred
+                        # callbacks.
+                        maya_utils.executeDeferred(lambda s=state, *a, **k: set_shift_preview_direction(-1 if s else 1))
+                    except Exception:
+                        pass
+
+                # Sleep a short interval to avoid busy-waiting.
+                time.sleep(0.05)
+
+        poll_thread = threading.Thread(target=_poll_shift, name="RubikShiftPoll", daemon=True)
+        poll_thread.start()
+        CONTROL_SHIFT_POLL_THREAD = poll_thread
+        CONTROL_SHIFT_POLL_STOP_EVENT = stop_event
+        # Mark CONTROL_SHIFT_TIMER so remove_shift_preview_timer can detect an
+        # active non-Qt poller; store the thread object.
+        CONTROL_SHIFT_TIMER = poll_thread
+        return
+    except Exception:
+        # As a last resort, fall back to a Maya idle scriptJob poll.
+        pass
+
+    # Fallback: use a Maya scriptJob on the "idle" event to poll modifier
+    # state when Qt isn't available. This keeps Shift-preview responsive on
+    # headless or non-PySide Maya variants.
     if CONTROL_SHIFT_TIMER is not None:
         return
 
-    CONTROL_SHIFT_TIMER = QtCore.QTimer()
-    CONTROL_SHIFT_TIMER.setInterval(5)
-    CONTROL_SHIFT_TIMER.timeout.connect(sync_shift_preview_from_qt)
-    CONTROL_SHIFT_TIMER.start()
+    try:
+        job_id = cmds.scriptJob(event=["idle", update_shift_preview_state], protected=True)
+        CONTROL_SHIFT_TIMER = job_id
+        CONTROL_SCRIPT_JOBS.append(job_id)
+    except Exception:
+        CONTROL_SHIFT_TIMER = None
 
 # Stop and destroy the timer used for Shift preview syncing.
 def remove_shift_preview_timer():
     global CONTROL_SHIFT_TIMER
+    global CONTROL_SHIFT_POLL_THREAD, CONTROL_SHIFT_POLL_STOP_EVENT
+    if CONTROL_SHIFT_TIMER is None and CONTROL_SHIFT_POLL_THREAD is None:
+        return
 
-    if CONTROL_SHIFT_TIMER is not None:
-        CONTROL_SHIFT_TIMER.stop()
-        CONTROL_SHIFT_TIMER.deleteLater()
-        CONTROL_SHIFT_TIMER = None
+    # If we created a Qt timer, stop and delete it cleanly.
+    try:
+        if hasattr(CONTROL_SHIFT_TIMER, "stop"):
+            CONTROL_SHIFT_TIMER.stop()
+            CONTROL_SHIFT_TIMER.deleteLater()
+            CONTROL_SHIFT_TIMER = None
+            return
+    except Exception:
+        pass
+
+    # If we created a background poll thread, signal it to stop and join.
+    try:
+        if CONTROL_SHIFT_POLL_STOP_EVENT is not None:
+            CONTROL_SHIFT_POLL_STOP_EVENT.set()
+            if CONTROL_SHIFT_POLL_THREAD is not None:
+                CONTROL_SHIFT_POLL_THREAD.join(0.2)
+            CONTROL_SHIFT_POLL_THREAD = None
+            CONTROL_SHIFT_POLL_STOP_EVENT = None
+            CONTROL_SHIFT_TIMER = None
+            return
+    except Exception:
+        pass
+
+    # If we created a Maya scriptJob (integer id), kill it.
+    try:
+        if isinstance(CONTROL_SHIFT_TIMER, int):
+            if cmds.scriptJob(exists=CONTROL_SHIFT_TIMER):
+                cmds.scriptJob(kill=CONTROL_SHIFT_TIMER, force=True)
+            # Also remove from CONTROL_SCRIPT_JOBS if present
+            try:
+                CONTROL_SCRIPT_JOBS.remove(CONTROL_SHIFT_TIMER)
+            except ValueError:
+                pass
+    except Exception:
+        pass
+
+    CONTROL_SHIFT_TIMER = None
 
 # Delete any scriptJobs created for viewport control behavior.
 def clear_control_script_jobs():
